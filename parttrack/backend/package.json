@@ -1,6 +1,6 @@
 {
   "name": "parttrack-backend",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "type": "module",
   "scripts": {
     "start": "node server.js",

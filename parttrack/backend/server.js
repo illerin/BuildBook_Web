@@ -14,7 +14,7 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.2';
+const APP_VERSION = '0.2.4';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://parttrack:parttrack@localhost:5432/parttrack',

@@ -29,6 +29,23 @@ function buildCategoryTree(categories) {
   return sortTree(roots);
 }
 
+function flattenCategoryTree(items) {
+  return items.flatMap((item) => [item, ...flattenCategoryTree(item.children || [])]);
+}
+
+function categoryFullLabel(category, categories, seen = new Set()) {
+  if (!category) return '';
+  if (!category.parent_id || seen.has(category.id)) return category.name;
+  const parent = categories.find((cat) => String(cat.id) === String(category.parent_id));
+  if (!parent) return category.name;
+  return `${categoryFullLabel(parent, categories, new Set([...seen, category.id]))} / ${category.name}`;
+}
+
+function categoryOptionText(category) {
+  const depth = String(category.label || category.name || '').split('/').filter(Boolean).length - 1;
+  return `${'  '.repeat(depth)}${depth > 0 ? '- ' : ''}${category.name}`;
+}
+
 function totalTreeCount(node) {
   return node.part_count + node.children.reduce((sum, child) => sum + totalTreeCount(child), 0);
 }
@@ -85,11 +102,10 @@ function CategoryManagerModal({ categories, onClose, onChanged }) {
   useEffect(() => { setRows(categories); }, [categories]);
 
   const options = useMemo(() => {
-    const byId = Object.fromEntries(rows.map((cat) => [cat.id, cat]));
     return rows
       .map((cat) => ({
         ...cat,
-        label: cat.parent_id && byId[cat.parent_id] ? `${byId[cat.parent_id].name} / ${cat.name}` : cat.name,
+        label: categoryFullLabel(cat, rows),
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [rows]);
@@ -360,11 +376,11 @@ export default function PartsLibrary() {
   }, [searchParams]);
 
   const categoryOptions = useMemo(() => {
-    const byId = Object.fromEntries(categories.map((c) => [c.id, c]));
-    return categories.map((c) => ({
+    const withLabels = categories.map((c) => ({
       ...c,
-      label: c.parent_id && byId[c.parent_id] ? `${byId[c.parent_id].name} / ${c.name}` : c.name,
+      label: categoryFullLabel(c, categories),
     }));
+    return flattenCategoryTree(buildCategoryTree(withLabels));
   }, [categories]);
 
   const categoryTree = useMemo(() => buildCategoryTree(categoryOptions), [categoryOptions]);
@@ -399,7 +415,7 @@ export default function PartsLibrary() {
         }}>
           <option value="">All categories</option>
           <option value="__unassigned">Unassigned</option>
-          {categoryOptions.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+          {categoryOptions.map((c) => <option key={c.id} value={c.id}>{categoryOptionText(c)}</option>)}
         </select>
         {(search || category || showUnassigned) && <button className="btn btn-secondary btn-sm" onClick={() => { setSearch(''); setCategory(''); setShowUnassigned(false); }}>Clear</button>}
       </div>
@@ -570,7 +586,7 @@ function PartModal({ part, categories, onClose, onSave }) {
             <label>Category</label>
             <select value={form.category_id} onChange={(e) => set('category_id', e.target.value)}>
               <option value="">Uncategorized</option>
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              {categories.map((c) => <option key={c.id} value={c.id}>{categoryOptionText(c)}</option>)}
             </select>
           </div>
         </div>
