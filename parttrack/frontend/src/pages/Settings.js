@@ -1,315 +1,255 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 
-const EXAMPLE_TEMPLATE = {
- categories: [
- {
- name: "Resistors",
- children: [
- { name: "Through-Hole Resistors" },
- { name: "SMD Resistors", children: [
- { name: "0402" },
- { name: "0603" },
- { name: "0805" }
- ]}
- ]
- },
- {
- name: "Capacitors",
- children: [
- { name: "Ceramic Capacitors" },
- { name: "Electrolytic Capacitors" },
- { name: "Tantalum Capacitors" }
- ]
- },
- {
- name: "Semiconductors",
- children: [
- { name: "MOSFETs" },
- { name: "BJTs" },
- { name: "Diodes" },
- { name: "Voltage Regulators" }
- ]
- },
- {
- name: "ICs",
- children: [
- { name: "Microcontrollers" },
- { name: "Op-Amps" },
- { name: "Logic Gates" },
- { name: "Motor Drivers" },
- { name: "Power Management" }
- ]
- },
- {
- name: "Connectors",
- children: [
- { name: "Pin Headers" },
- { name: "JST Connectors" },
- { name: "USB Connectors" },
- { name: "Barrel Jacks" }
- ]
- },
- {
- name: "Passive Components",
- children: [
- { name: "Inductors" },
- { name: "Crystals & Oscillators" },
- { name: "Fuses" }
- ]
- },
- {
- name: "Electromechanical",
- children: [
- { name: "Relays" },
- { name: "Switches" },
- { name: "Buttons" },
- { name: "Motors" }
- ]
- },
- {
- name: "Displays & LEDs",
- children: [
- { name: "LEDs" },
- { name: "7-Segment Displays" },
- { name: "OLED Displays" },
- { name: "LCD Displays" }
- ]
- },
- {
- name: "Sensors",
- children: [
- { name: "Temperature Sensors" },
- { name: "Humidity Sensors" },
- { name: "IMU / Accelerometers" },
- { name: "Optical Sensors" }
- ]
- },
- {
- name: "Modules & Breakouts",
- children: [
- { name: "WiFi / Bluetooth Modules" },
- { name: "Power Supply Modules" },
- { name: "Display Modules" }
- ]
- },
- { name: "Mechanical & Hardware" },
- { name: "PCBs" },
- { name: "Tools & Consumables" }
- ]
-};
-
 function Section({ title, description, children }) {
- return (
- <div className="card" style={{ marginBottom: 16 }}>
- <h2 style={{ fontSize: 15, marginBottom: 4 }}>{title}</h2>
- {description && <p style={{ color: '#8b949e', fontSize: 13, marginBottom: 14 }}>{description}</p>}
- {children}
- </div>
- );
+  return (
+    <section className="card settings-section">
+      <h2>{title}</h2>
+      {description && <p className="muted">{description}</p>}
+      {children}
+    </section>
+  );
 }
 
-function useFileOp(label) {
- const [state, setState] = useState({ loading: false, msg: '', err: '' });
- const flash = (msg, isErr) => {
- setState({ loading: false, msg: isErr ? '' : msg, err: isErr ? msg : '' });
- setTimeout(() => setState(s => ({ ...s, msg: '', err: '' })), 5000);
- };
- const start = () => setState({ loading: true, msg: '', err: '' });
- return { ...state, flash, start };
+function useOp() {
+  const [state, setState] = useState({ loading: false, msg: '', err: '' });
+  const start = () => setState({ loading: true, msg: '', err: '' });
+  const done = (msg) => {
+    setState({ loading: false, msg, err: '' });
+    setTimeout(() => setState((s) => ({ ...s, msg: '' })), 5000);
+  };
+  const fail = (err) => {
+    setState({ loading: false, msg: '', err });
+    setTimeout(() => setState((s) => ({ ...s, err: '' })), 5000);
+  };
+  return { ...state, start, done, fail };
 }
 
 async function triggerDownload(fetchPromise, fallbackName) {
- const res = await fetchPromise;
- if (!res.ok) throw new Error(await res.text());
- const blob = await res.blob();
- const cd = res.headers.get('Content-Disposition') || '';
- const match = cd.match(/filename="?([^"]+)"?/);
- const filename = match ? match[1] : fallbackName;
- const url = URL.createObjectURL(blob);
- const a = document.createElement('a');
- a.href = url; a.download = filename; a.click();
- URL.revokeObjectURL(url);
+  const response = await fetchPromise;
+  if (!response.ok) throw new Error(await response.text());
+  const blob = await response.blob();
+  const header = response.headers.get('Content-Disposition') || '';
+  const match = header.match(/filename="?([^"]+)"?/);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = match ? match[1] : fallbackName;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Settings() {
- return (
- <div>
- <div className="page-header"><h1>Settings</h1></div>
+  const [templateOpen, setTemplateOpen] = useState(false);
 
- <TemplateSection />
- <InventorySection />
- <BackupSection />
- </div>
- );
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>Settings</h1>
+          <p className="page-subtitle">Project defaults, file tracking rules, backup, and restore.</p>
+        </div>
+      </div>
+      <Section
+        title="Project Template"
+        description="Control the default project step buttons, starter checklist items, and tracked file types used on project pages."
+      >
+        <button className="btn btn-primary" onClick={() => setTemplateOpen(true)}>Project Template</button>
+      </Section>
+      <BackupSection />
+      <ReadmeSection />
+      {templateOpen && <ProjectTemplateModal onClose={() => setTemplateOpen(false)} />}
+    </div>
+  );
 }
 
-function TemplateSection() {
- const op = useFileOp('template');
- const fileRef = useRef(null);
+function ProjectTemplateModal({ onClose }) {
+  const [template, setTemplate] = useState(null);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [saving, setSaving] = useState(false);
 
- const downloadExample = () => {
- const blob = new Blob([JSON.stringify(EXAMPLE_TEMPLATE, null, 2)], { type: 'application/json' });
- const a = document.createElement('a');
- a.href = URL.createObjectURL(blob);
- a.download = 'electronics-template.json';
- a.click();
- };
+  useEffect(() => {
+    api.getProjectTemplate().then(setTemplate).catch((e) => setErr(e.message));
+  }, []);
 
- const importFile = async (e) => {
- const file = e.target.files[0]; if (!file) return;
- op.start();
- try {
- const form = new FormData(); form.append('file', file);
- const res = await api.importTemplate(form);
- op.flash(`Created ${res.created} categories.`);
- } catch(err) { op.flash(err.message, true); }
- e.target.value = '';
- };
+  const updateStep = (index, value) => {
+    setTemplate((t) => ({
+      ...t,
+      steps: t.steps.map((step, i) => (i === index ? { ...step, name: value } : step)),
+    }));
+  };
 
- return (
- <Section
- title=" Category Template"
- description="Import a predefined set of categories and subcategories to quickly scaffold your inventory structure. Does not affect existing categories.">
- {op.msg && <div className="alert alert-success">{op.msg}</div>}
- {op.err && <div className="alert alert-error">{op.err}</div>}
- <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
- <button className="btn btn-secondary" onClick={downloadExample}>
- Download Example Template
- </button>
- <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
- Import Template
- <input ref={fileRef} type="file" accept=".json" style={{ display: 'none' }} onChange={importFile} />
- </label>
- </div>
- <div style={{ marginTop: 14, background: '#0d1117', borderRadius: 6, border: '1px solid #30363d', padding: 12 }}>
- <p style={{ color: '#8b949e', fontSize: 12, marginBottom: 8 }}>Template JSON format:</p>
- <pre style={{ color: '#8b949e', fontSize: 11, margin: 0, overflowX: 'auto' }}>{`{
- "categories": [
- {
- "name": "Resistors",
- "children": [
- { "name": "Through-Hole Resistors" },
- {
- "name": "SMD Resistors",
- "children": [
- { "name": "0402" },
- { "name": "0805" }
- ]
- }
- ]
- }
- ]
-}`}</pre>
- </div>
- </Section>
- );
-}
+  const updateChecklist = (index, value) => {
+    setTemplate((t) => ({
+      ...t,
+      default_checklist: t.default_checklist.map((item, i) => (i === index ? value : item)),
+    }));
+  };
 
-function InventorySection() {
- const expOp = useFileOp('export');
- const impOp = useFileOp('import');
- const importRef = useRef(null);
+  const updateTracker = (index, key, value) => {
+    setTemplate((t) => ({
+      ...t,
+      file_trackers: t.file_trackers.map((tracker, i) => (i === index ? { ...tracker, [key]: value } : tracker)),
+    }));
+  };
 
- const doExport = async () => {
- expOp.start();
- try {
- await triggerDownload(api.exportInventory(), 'inventory.json');
- expOp.flash('Inventory exported.');
- } catch(err) { expOp.flash(err.message, true); }
- };
+  const save = async () => {
+    setSaving(true);
+    setErr('');
+    try {
+      const saved = await api.updateProjectTemplate({
+        steps: template.steps,
+        default_checklist: template.default_checklist,
+        file_trackers: template.file_trackers,
+      });
+      setTemplate(saved);
+      setMsg('Project template saved.');
+      setTimeout(() => setMsg(''), 3500);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
- const doImport = async (e) => {
- const file = e.target.files[0]; if (!file) return;
- if (!window.confirm('This will merge the inventory file into your current data. Existing parts will not be overwritten. Continue?')) {
- e.target.value = ''; return;
- }
- impOp.start();
- try {
- const form = new FormData(); form.append('file', file);
- const res = await api.importInventory(form);
- impOp.flash(`Imported ${res.categories} categories and ${res.variants} parts.`);
- } catch(err) { impOp.flash(err.message, true); }
- e.target.value = '';
- };
+  return (
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal template-modal">
+        <div className="card-header">
+          <h2>Project Template</h2>
+          <button className="btn-icon" onClick={onClose}>x</button>
+        </div>
+        {err && <div className="alert alert-error">{err}</div>}
+        {msg && <div className="alert alert-success">{msg}</div>}
+        {!template ? <div className="loading">Loading...</div> : (
+          <div className="template-grid">
+            <section className="template-preview">
+              <h3>Mock Project</h3>
+              <div className="mock-project-title">New Electronics Project</div>
+              <div className="step-button-grid">
+                {template.steps.filter((step) => step.name.trim()).map((step, index) => (
+                  <button key={`${step.id || 'new'}-${index}`} className={`step-button ${index < 3 ? 'active' : ''}`}>
+                    {step.name}
+                  </button>
+                ))}
+              </div>
+              <div className="mock-checklist">
+                {template.default_checklist.filter(Boolean).slice(0, 5).map((item, index) => (
+                  <label key={index} className="checklist-item">
+                    <input type="checkbox" readOnly checked={index === 0} />
+                    <span className={`item-text ${index === 0 ? 'done' : ''}`}>{item}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
 
- return (
- <Section
- title="Inventory Export / Import"
- description="Export your full category tree and all parts (with quantities and locations) to a JSON file. Import merges into existing data without overwriting.">
- {expOp.msg && <div className="alert alert-success">{expOp.msg}</div>}
- {expOp.err && <div className="alert alert-error">{expOp.err}</div>}
- {impOp.msg && <div className="alert alert-success">{impOp.msg}</div>}
- {impOp.err && <div className="alert alert-error">{impOp.err}</div>}
- <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
- <button className="btn btn-secondary" onClick={doExport} disabled={expOp.loading}>
- {expOp.loading ? 'Exporting…' : ' Export Inventory'}
- </button>
- <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
- {impOp.loading ? 'Importing…' : 'Import Inventory'}
- <input ref={importRef} type="file" accept=".json" style={{ display: 'none' }} onChange={doImport} />
- </label>
- </div>
- <p style={{ color: '#8b949e', fontSize: 12, marginTop: 12 }}>
- Exported file includes: categories, subcategories, part labels, quantities, storage locations, and notes.
- Does <strong>not</strong> include orders, projects, or uploaded files.
- </p>
- </Section>
- );
+            <section className="template-editor">
+              <h3>Project Steps</h3>
+              {template.steps.map((step, index) => (
+                <div className="template-row" key={`${step.id || 'step'}-${index}`}>
+                  <input value={step.name} onChange={(e) => updateStep(index, e.target.value)} />
+                  <button className="btn-icon" onClick={() => setTemplate((t) => ({ ...t, steps: t.steps.filter((_, i) => i !== index) }))}>x</button>
+                </div>
+              ))}
+              <button className="btn btn-secondary btn-sm" onClick={() => setTemplate((t) => ({ ...t, steps: [...t.steps, { name: '', order_index: t.steps.length }] }))}>Add Step</button>
+
+              <h3>Default Checklist</h3>
+              {template.default_checklist.map((item, index) => (
+                <div className="template-row" key={`check-${index}`}>
+                  <input value={item} onChange={(e) => updateChecklist(index, e.target.value)} placeholder="Checklist item" />
+                  <button className="btn-icon" onClick={() => setTemplate((t) => ({ ...t, default_checklist: t.default_checklist.filter((_, i) => i !== index) }))}>x</button>
+                </div>
+              ))}
+              <button className="btn btn-secondary btn-sm" onClick={() => setTemplate((t) => ({ ...t, default_checklist: [...t.default_checklist, ''] }))}>Add Checklist Item</button>
+
+              <h3>Tracked File Types</h3>
+              {template.file_trackers.map((tracker, index) => (
+                <div className="tracker-row" key={`${tracker.key}-${index}`}>
+                  <input value={tracker.label} onChange={(e) => updateTracker(index, 'label', e.target.value)} placeholder="Drawings" />
+                  <input value={tracker.extensions} onChange={(e) => updateTracker(index, 'extensions', e.target.value)} placeholder=".dwg,.dxf" />
+                  <button className="btn-icon" onClick={() => setTemplate((t) => ({ ...t, file_trackers: t.file_trackers.filter((_, i) => i !== index) }))}>x</button>
+                </div>
+              ))}
+              <button className="btn btn-secondary btn-sm" onClick={() => setTemplate((t) => ({ ...t, file_trackers: [...t.file_trackers, { label: '', extensions: '' }] }))}>Add File Type</button>
+            </section>
+          </div>
+        )}
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onClose}>Close</button>
+          <button className="btn btn-primary" disabled={!template || saving} onClick={save}>{saving ? 'Saving...' : 'Save Template'}</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function BackupSection() {
- const backOp = useFileOp('backup');
- const restOp = useFileOp('restore');
- const restoreRef = useRef(null);
+  const backup = useOp();
+  const restore = useOp();
+  const restoreRef = useRef(null);
 
- const doBackup = async () => {
- backOp.start();
- try {
- await triggerDownload(api.downloadBackup(), 'parttrack-backup.json');
- backOp.flash('Backup downloaded.');
- } catch(err) { backOp.flash(err.message, true); }
- };
+  const doBackup = async () => {
+    backup.start();
+    try {
+      await triggerDownload(api.downloadBackup(), 'electronics-tracker-backup.json');
+      backup.done('Backup downloaded.');
+    } catch (e) {
+      backup.fail(e.message);
+    }
+  };
 
- const doRestore = async (e) => {
- const file = e.target.files[0]; if (!file) return;
- if (!window.confirm(
- 'RESTORE will WIPE ALL current data and replace it with the backup.\n\nThis cannot be undone. Are you sure?'
- )) { e.target.value = ''; return; }
- restOp.start();
- try {
- const form = new FormData(); form.append('file', file);
- await api.restoreBackup(form);
- restOp.flash('Restore complete. Reload the page to see your data.');
- } catch(err) { restOp.flash(err.message, true); }
- e.target.value = '';
- };
+  const doRestore = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!window.confirm('Restore will wipe all current database records and replace them with this backup. Continue?')) {
+      e.target.value = '';
+      return;
+    }
+    restore.start();
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      await api.restoreBackup(form);
+      restore.done('Restore complete. Reload the app to see restored data.');
+    } catch (err) {
+      restore.fail(err.message);
+    }
+    e.target.value = '';
+  };
 
- return (
- <Section
- title="Backup & Restore"
- description="A full backup includes everything: inventory, orders, projects, checklists, and adjustment logs. Restoring completely replaces all current data.">
- {backOp.msg && <div className="alert alert-success">{backOp.msg}</div>}
- {backOp.err && <div className="alert alert-error">{backOp.err}</div>}
- {restOp.msg && <div className="alert alert-success">{restOp.msg}</div>}
- {restOp.err && <div className="alert alert-error">{restOp.err}</div>}
+  return (
+    <Section
+      title="Backup and Restore"
+      description="Backup includes projects, parts, import batches, links, notes, and file metadata. Uploaded files themselves stay on disk and should be preserved with the Docker volume."
+    >
+      {backup.msg && <div className="alert alert-success">{backup.msg}</div>}
+      {backup.err && <div className="alert alert-error">{backup.err}</div>}
+      {restore.msg && <div className="alert alert-success">{restore.msg}</div>}
+      {restore.err && <div className="alert alert-error">{restore.err}</div>}
+      <div className="button-row">
+        <button className="btn btn-secondary" onClick={doBackup} disabled={backup.loading}>
+          {backup.loading ? 'Preparing...' : 'Download Backup'}
+        </button>
+        <label className="btn btn-danger">
+          {restore.loading ? 'Restoring...' : 'Restore Backup'}
+          <input ref={restoreRef} type="file" accept=".json" hidden onChange={doRestore} />
+        </label>
+      </div>
+    </Section>
+  );
+}
 
- <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
- <button className="btn btn-secondary" onClick={doBackup} disabled={backOp.loading}>
- {backOp.loading ? 'Preparing…' : 'Download Backup'}
- </button>
- <label className="btn btn-danger" style={{ cursor: 'pointer' }}>
- {restOp.loading ? 'Restoring…' : ' Restore from Backup'}
- <input ref={restoreRef} type="file" accept=".json" style={{ display: 'none' }} onChange={doRestore} />
- </label>
- </div>
-
- <div style={{ background: '#5d1a1a', border: '1px solid #f85149', borderRadius: 6, padding: '10px 14px' }}>
- <p style={{ color: '#f85149', fontSize: 13, margin: 0 }}>
- Restore permanently deletes all current data. Always download a backup before restoring.
- Uploaded image files and documents on disk are <strong>not</strong> included in the backup JSON and must be preserved separately.
- </p>
- </div>
- </Section>
- );
+function ReadmeSection() {
+  return (
+    <Section
+      title="Quick Notes"
+      description="ProjectTrack is for documenting electronics builds: projects hold notes, latest files, linked parts, datasheets, and checklist progress."
+    >
+      <div className="settings-list">
+        <span>Use Project Template to tune default steps, checklist items, and tracked file types.</span>
+        <span>Use Backup before major cleanup or category/template changes.</span>
+      </div>
+    </Section>
+  );
 }
