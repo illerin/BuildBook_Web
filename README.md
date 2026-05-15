@@ -106,9 +106,9 @@ docker compose up -d
 ### Settings
 
 - Configure project step tags, starter checklist items, and tracked file types
-- Download a full JSON backup of database records
-- Restore from a BuildBook_Web backup
-- Uploaded files are stored on disk in the Docker volume and are not embedded in the JSON backup
+- Download a portable backup zip with database records and uploaded files
+- Restore from a BuildBook_Web backup zip on the same install, a wiped Docker install, or another computer
+- Older JSON-only backups can still be restored, but they do not contain uploaded files
 
 ## Architecture
 
@@ -144,3 +144,5 @@ Docker Compose mounts:
 - `buildbook-web-pgdata` for PostgreSQL data
 
 Keep both volumes if you want to preserve the app state.
+
+The in-app backup feature is the portable option. It downloads a zip containing the database backup plus uploaded images, documents, project files, and import files.

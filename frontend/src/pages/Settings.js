@@ -193,7 +193,7 @@ function BackupSection() {
   const doBackup = async () => {
     backup.start();
     try {
-      await triggerDownload(api.downloadBackup(), 'buildbook-web-backup.json');
+      await triggerDownload(api.downloadBackup(), 'buildbook-web-backup.zip');
       backup.done('Backup downloaded.');
     } catch (e) {
       backup.fail(e.message);
@@ -203,7 +203,7 @@ function BackupSection() {
   const doRestore = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (!window.confirm('Restore will wipe all current database records and replace them with this backup. Continue?')) {
+    if (!window.confirm('Restore will wipe all current database records and uploaded files, then replace them with this backup. Continue?')) {
       e.target.value = '';
       return;
     }
@@ -222,7 +222,7 @@ function BackupSection() {
   return (
     <Section
       title="Backup and Restore"
-      description="Backup includes projects, reference parts, import batches, links, notes, checklist data, and file metadata. Uploaded files stay on disk and should be preserved with the Docker volume."
+      description="Backup downloads a portable zip containing database records and uploaded files. Restore can rebuild the app on a fresh Docker install or another computer from that one file."
     >
       {backup.msg && <div className="alert alert-success">{backup.msg}</div>}
       {backup.err && <div className="alert alert-error">{backup.err}</div>}
@@ -234,7 +234,7 @@ function BackupSection() {
         </button>
         <label className="btn btn-danger">
           {restore.loading ? 'Restoring...' : 'Restore Backup'}
-          <input ref={restoreRef} type="file" accept=".json" hidden onChange={doRestore} />
+          <input ref={restoreRef} type="file" accept=".zip,.json" hidden onChange={doRestore} />
         </label>
       </div>
     </Section>

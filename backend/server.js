@@ -14,7 +14,7 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.12';
+const APP_VERSION = '0.2.13';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -25,8 +25,9 @@ const DOC_DIR = path.join(UPLOAD_DIR, 'documents');
 const PROJECT_DIR = path.join(UPLOAD_DIR, 'projects');
 const IMAGE_DIR = path.join(UPLOAD_DIR, 'images');
 const IMPORT_DIR = path.join(UPLOAD_DIR, 'imports');
+const BACKUP_DIR = path.join(UPLOAD_DIR, 'backup-tmp');
 
-[UPLOAD_DIR, DOC_DIR, PROJECT_DIR, IMAGE_DIR, IMPORT_DIR].forEach((dir) => {
+[UPLOAD_DIR, DOC_DIR, PROJECT_DIR, IMAGE_DIR, IMPORT_DIR, BACKUP_DIR].forEach((dir) => {
   fs.mkdirSync(dir, { recursive: true });
 });
 
@@ -54,6 +55,7 @@ const uploadProject = multer({ storage: makeStorage(PROJECT_DIR) });
 const uploadImage = multer({ storage: makeStorage(IMAGE_DIR), fileFilter: imageFilter });
 const uploadCsv = multer({ storage: multer.memoryStorage() });
 const uploadProjectImport = multer({ storage: makeStorage(IMPORT_DIR) });
+const uploadBackup = multer({ storage: makeStorage(BACKUP_DIR) });
 
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -2231,97 +2233,173 @@ app.delete('/api/imports/:id', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// Settings: backup and restore for v2 data. Files on disk are not embedded.
-app.get('/api/settings/backup', asyncHandler(async (req, res) => {
+const BACKUP_TABLES = [
+  'app_metadata',
+  'category',
+  'part',
+  'part_document',
+  'project',
+  'project_part',
+  'project_file',
+  'project_checklist_item',
+  'step_definition',
+  'project_step',
+  'import_batch',
+  'import_item',
+];
+const BACKUP_WIPE_ORDER = [
+  'import_item',
+  'import_batch',
+  'project_step',
+  'project_checklist_item',
+  'project_file',
+  'project_part',
+  'project',
+  'step_definition',
+  'part_document',
+  'part',
+  'category',
+];
+const BACKUP_SEQ_TABLES = [
+  'import_item',
+  'import_batch',
+  'project_checklist_item',
+  'project_file',
+  'project_part',
+  'project',
+  'step_definition',
+  'part_document',
+  'part',
+  'category',
+];
+
+async function buildBackupData() {
   const tables = [
-    'app_metadata',
-    'category',
-    'part',
-    'part_document',
-    'project',
-    'project_part',
-    'project_file',
-    'project_checklist_item',
-    'step_definition',
-    'project_step',
-    'import_batch',
-    'import_item',
+    ...BACKUP_TABLES,
   ];
   const backupOrderBy = {
     app_metadata: 'key',
     project_step: 'project_id, step_definition_id',
   };
-  const data = { type: 'buildbook-web-backup', version: 2, exported_at: new Date().toISOString() };
+  const data = {
+    type: 'buildbook-web-backup',
+    version: 3,
+    app_version: APP_VERSION,
+    exported_at: new Date().toISOString(),
+    includes_uploads: true,
+  };
   for (const table of tables) {
     const where = table === 'app_metadata' ? ` WHERE key <> 'schema_version'` : '';
     const orderBy = backupOrderBy[table] || 'id';
     const { rows } = await pool.query(`SELECT * FROM ${table}${where} ORDER BY ${orderBy}`);
     data[table] = rows;
   }
-  res.setHeader('Content-Disposition', `attachment; filename="buildbook-web-backup-${Date.now()}.json"`);
-  res.json(data);
+  return data;
+}
+
+function addUploadDirToArchive(archive, dir, archiveRoot) {
+  if (!fs.existsSync(dir)) return;
+  fs.readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
+    const source = path.join(dir, entry.name);
+    const archivePath = `${archiveRoot}/${entry.name}`;
+    if (entry.isDirectory()) addUploadDirToArchive(archive, source, archivePath);
+    else if (entry.isFile()) archive.file(source, { name: archivePath });
+  });
+}
+
+function emptyUploadDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
+    const target = path.join(dir, entry.name);
+    if (entry.isDirectory()) fs.rmSync(target, { recursive: true, force: true });
+    else fs.rmSync(target, { force: true });
+  });
+}
+
+async function restoreBackupData(client, data) {
+  if (data.type !== 'buildbook-web-backup' || ![2, 3].includes(data.version)) {
+    throw new Error('Not a BuildBook_Web backup file');
+  }
+  for (const table of BACKUP_WIPE_ORDER) await client.query(`DELETE FROM ${table}`);
+  await client.query(`DELETE FROM app_metadata WHERE key <> 'schema_version'`);
+
+  const insertRows = async (table, rows) => {
+    if (!rows?.length) return;
+    const cols = Object.keys(rows[0]);
+    for (const row of rows) {
+      const values = cols.map((col) => row[col]);
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
+      await client.query(
+        `INSERT INTO ${table} (${cols.map((c) => `"${c}"`).join(',')}) VALUES (${placeholders})`,
+        values,
+      );
+    }
+  };
+
+  if (Array.isArray(data.app_metadata)) {
+    for (const row of data.app_metadata) {
+      await setJsonSetting(client, row.key, row.value);
+    }
+  }
+  for (const table of BACKUP_WIPE_ORDER.slice().reverse()) await insertRows(table, data[table]);
+
+  for (const table of BACKUP_SEQ_TABLES) {
+    await client.query(`SELECT setval(pg_get_serial_sequence('${table}','id'), COALESCE(MAX(id),0)+1, false) FROM ${table}`);
+  }
+}
+
+function restoreUploadsFromZip(directory) {
+  [DOC_DIR, PROJECT_DIR, IMAGE_DIR, IMPORT_DIR].forEach(emptyUploadDir);
+  const uploadRoots = new Set(['documents', 'projects', 'images', 'imports']);
+  return Promise.all(directory.files
+    .filter((file) => file.path.startsWith('uploads/') && file.type !== 'Directory')
+    .map(async (file) => {
+      const parts = file.path.split('/').filter(Boolean);
+      const root = parts[1];
+      if (!uploadRoots.has(root) || parts.length < 3) return;
+      const relative = parts.slice(2).join('/');
+      const targetRoot = path.join(UPLOAD_DIR, root);
+      const target = path.resolve(targetRoot, relative);
+      if (!target.startsWith(path.resolve(targetRoot) + path.sep)) return;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, await file.buffer());
+    }));
+}
+
+// Settings: full portable backup and restore.
+app.get('/api/settings/backup', asyncHandler(async (req, res) => {
+  const data = await buildBackupData();
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="buildbook-web-backup-${Date.now()}.zip"`);
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (err) => { throw err; });
+  archive.pipe(res);
+  archive.append(JSON.stringify(data, null, 2), { name: 'backup.json' });
+  addUploadDirToArchive(archive, DOC_DIR, 'uploads/documents');
+  addUploadDirToArchive(archive, PROJECT_DIR, 'uploads/projects');
+  addUploadDirToArchive(archive, IMAGE_DIR, 'uploads/images');
+  addUploadDirToArchive(archive, IMPORT_DIR, 'uploads/imports');
+  await archive.finalize();
 }));
 
-app.post('/api/settings/restore', uploadCsv.single('file'), asyncHandler(async (req, res) => {
+app.post('/api/settings/restore', uploadBackup.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Backup file is required' });
-  const data = JSON.parse(req.file.buffer.toString('utf-8'));
-  if (data.type !== 'buildbook-web-backup' || data.version !== 2) {
-    return res.status(400).json({ error: 'Not a v2 backup file' });
+  let data;
+  let directory = null;
+  const isZip = req.file.originalname?.toLowerCase().endsWith('.zip') || req.file.mimetype === 'application/zip';
+  if (isZip) {
+    directory = await unzipper.Open.file(req.file.path);
+    const backupEntry = directory.files.find((file) => file.path === 'backup.json');
+    if (!backupEntry) return res.status(400).json({ error: 'This backup zip does not include backup.json.' });
+    data = JSON.parse((await backupEntry.buffer()).toString('utf-8'));
+  } else {
+    data = JSON.parse(fs.readFileSync(req.file.path, 'utf-8'));
   }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const wipe = [
-      'import_item',
-      'import_batch',
-      'project_step',
-      'project_checklist_item',
-      'project_file',
-      'project_part',
-      'project',
-      'step_definition',
-      'part_document',
-      'part',
-      'category',
-    ];
-    for (const table of wipe) await client.query(`DELETE FROM ${table}`);
-    await client.query(`DELETE FROM app_metadata WHERE key <> 'schema_version'`);
-
-    const insertRows = async (table, rows) => {
-      if (!rows?.length) return;
-      const cols = Object.keys(rows[0]);
-      for (const row of rows) {
-        const values = cols.map((col) => row[col]);
-        const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
-        await client.query(
-          `INSERT INTO ${table} (${cols.map((c) => `"${c}"`).join(',')}) VALUES (${placeholders})`,
-          values,
-        );
-      }
-    };
-
-    if (Array.isArray(data.app_metadata)) {
-      for (const row of data.app_metadata) {
-        await setJsonSetting(client, row.key, row.value);
-      }
-    }
-    for (const table of wipe.slice().reverse()) await insertRows(table, data[table]);
-
-    const seqTables = [
-      'import_item',
-      'import_batch',
-      'project_checklist_item',
-      'project_file',
-      'project_part',
-      'project',
-      'step_definition',
-      'part_document',
-      'part',
-      'category',
-    ];
-    for (const table of seqTables) {
-      await client.query(`SELECT setval(pg_get_serial_sequence('${table}','id'), COALESCE(MAX(id),0)+1, false) FROM ${table}`);
-    }
+    await restoreBackupData(client, data);
+    if (directory) await restoreUploadsFromZip(directory);
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (e) {
@@ -2329,6 +2407,7 @@ app.post('/api/settings/restore', uploadCsv.single('file'), asyncHandler(async (
     throw e;
   } finally {
     client.release();
+    rmUpload(BACKUP_DIR, req.file.filename);
   }
 }));
 
