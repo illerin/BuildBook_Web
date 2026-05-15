@@ -4,6 +4,20 @@ A self-hosted web app for documenting electronics projects and keeping a searcha
 
 Projects are the main workspace. Parts are reusable reference records for product information, datasheets, storage location, images, and related documents.
 
+## Screenshots
+
+### Projects
+
+![Projects tab](docs/images/projects-tab.png)
+
+### Parts Library
+
+![Parts Library tab](docs/images/parts-tab.png)
+
+### Imports
+
+![Imports tab](docs/images/imports-tab.png)
+
 ## Quick Start
 
 Create a folder for BuildBook_Web and save this as `docker-compose.yml`:
