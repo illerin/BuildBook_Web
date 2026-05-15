@@ -1,0 +1,13 @@
+services:
+  buildbook_web:
+    build: .
+    ports:
+      - "8079:8080"
+    volumes:
+      - buildbook-web-uploads:/app/uploads
+      - buildbook-web-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  buildbook-web-uploads:
+  buildbook-web-pgdata:

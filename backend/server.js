@@ -14,10 +14,10 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.4';
+const APP_VERSION = '0.2.5';
 
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://parttrack:parttrack@localhost:5432/parttrack',
+  connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
 });
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', 'uploads');
@@ -234,7 +234,7 @@ async function downloadImageToLibrary(url) {
 
   const response = await fetch(normalized, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 ProjectTrack/2.0',
+      'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0',
       Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
     },
   });
@@ -333,13 +333,155 @@ function extractImageFromHtml(html) {
   return null;
 }
 
+function decodeHtmlImageUrl(value) {
+  if (!value) return null;
+  const text = String(value)
+    .replace(/\\u0026/g, '&')
+    .replace(/\\\//g, '/')
+    .replace(/&amp;/g, '&')
+    .trim();
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+function isLikelyNotFoundPage(html, finalUrl = '') {
+  const title = html.match(/<title[^>]*>(.*?)<\/title>/i)?.[1] || '';
+  const heading = html.match(/<h1[^>]*>(.*?)<\/h1>/i)?.[1] || '';
+  const text = `${title} ${heading} ${finalUrl}`.toLowerCase();
+  return /\b(404|not found|page unavailable|page not found|product not found|item not found|no longer available)\b/.test(text);
+}
+
+function isLikelyUsefulImageUrl(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  const lower = url.toLowerCase();
+  return ![
+    'logo',
+    'favicon',
+    'sprite',
+    'placeholder',
+    'noimage',
+    'no-image',
+    'notfound',
+    'not-found',
+    '404',
+    'blank',
+    'transparent',
+    'tracking',
+    'pixel',
+  ].some((term) => lower.includes(term));
+}
+
+async function probeImageUrl(url) {
+  if (!isLikelyUsefulImageUrl(url)) return null;
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0',
+        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      },
+    });
+    if (!response.ok) return null;
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.startsWith('image/')) return null;
+    const length = Number(response.headers.get('content-length') || 0);
+    if (length && length < 500) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+async function firstUsableImageUrl(candidates, limit = 8) {
+  const unique = [...new Set(candidates.filter(Boolean))].filter(isLikelyUsefulImageUrl).slice(0, limit);
+  for (const url of unique) {
+    const usable = await probeImageUrl(url);
+    if (usable) return usable;
+  }
+  return null;
+}
+
+function buildImageSearchQuery(item) {
+  return [
+    item.raw_name,
+    item.attributes,
+    item.store,
+    'electronic component',
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function extractImagesFromSearchHtml(html) {
+  const found = new Set();
+  const patterns = [
+    /"murl"\s*:\s*"([^"]+)"/gi,
+    /"contentUrl"\s*:\s*"([^"]+)"/gi,
+    /mediaurl=([^&"']+)/gi,
+  ];
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html))) {
+      const decoded = decodeHtmlImageUrl(match[1]);
+      if (decoded && /^https?:\/\//i.test(decoded)) found.add(decoded);
+    }
+  }
+  return [...found].filter(isLikelyUsefulImageUrl);
+}
+
+async function findImageFromProductPage(url) {
+  const normalized = normalizeImageUrl(url);
+  if (!normalized) return null;
+  try {
+    const parsed = new URL(normalized);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    const response = await fetch(normalized, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      },
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    if (isLikelyNotFoundPage(html, response.url)) return null;
+    return firstUsableImageUrl([extractImageFromHtml(html)]);
+  } catch (e) {
+    console.warn('Product page image lookup failed:', e.message);
+    return null;
+  }
+}
+
+async function findWebImageForImportItem(item) {
+  const productImage = await findImageFromProductPage(item.product_url);
+  if (productImage) return productImage;
+
+  const query = buildImageSearchQuery(item);
+  if (!query) return null;
+  try {
+    const response = await fetch(`https://www.bing.com/images/search?q=${encodeURIComponent(query)}&safeSearch=moderate`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+    if (!response.ok) return null;
+    const images = extractImagesFromSearchHtml(await response.text());
+    return firstUsableImageUrl(images, 12);
+  } catch (e) {
+    console.warn('Internet image search failed:', e.message);
+    return null;
+  }
+}
+
 async function findDigiKeyImage(partNumber) {
   const url = makeDigiKeyUrl(partNumber);
   if (!url) return null;
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 ProjectTrack/2.0',
+        'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       },
     });
@@ -903,6 +1045,29 @@ app.post('/api/parts/:id/image', uploadImage.single('image'), asyncHandler(async
   res.json(rows[0]);
 }));
 
+app.post('/api/parts/:id/find-image', asyncHandler(async (req, res) => {
+  const { rows: [part] } = await pool.query(`SELECT * FROM part WHERE id=$1`, [req.params.id]);
+  if (!part) return res.status(404).json({ error: 'Part not found' });
+  if (part.image_path) return res.json({ ok: true, found: false, part });
+
+  const imageUrl = await findWebImageForImportItem({
+    raw_name: part.name,
+    attributes: [part.spec_summary, part.notes].filter(Boolean).join('\n'),
+    store: '',
+    product_url: part.product_url,
+  });
+  if (!imageUrl) return res.json({ ok: true, found: false, part });
+
+  const filename = await downloadImageToLibrary(imageUrl);
+  if (!filename) return res.json({ ok: true, found: false, part });
+
+  const { rows: [updated] } = await pool.query(
+    `UPDATE part SET image_path=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
+    [filename, part.id],
+  );
+  res.json({ ok: true, found: true, image_url: imageUrl, part: updated });
+}));
+
 app.delete('/api/parts/:id/image', asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`SELECT image_path FROM part WHERE id=$1`, [req.params.id]);
   await pool.query(`UPDATE part SET image_path=NULL, updated_at=NOW() WHERE id=$1`, [req.params.id]);
@@ -954,7 +1119,7 @@ app.post('/api/scrape-spec', asyncHandler(async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL is required' });
   try {
-    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 PartTrack/2.0' } });
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 BuildBook_Web/2.0' } });
     const html = await response.text();
     const text = html
       .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -1030,7 +1195,6 @@ app.get('/api/projects', asyncHandler(async (req, res) => {
            COUNT(DISTINCT pp.id)::int AS part_count,
            COUNT(DISTINCT pc.id)::int AS checklist_total,
            COUNT(DISTINCT pc.id) FILTER (WHERE pc.is_completed)::int AS checklist_done,
-           COUNT(DISTINCT ns.id) FILTER (WHERE NOT ns.is_completed)::int AS next_step_count,
            COALESCE(
              jsonb_agg(DISTINCT jsonb_build_object('id', sd.id, 'name', sd.name, 'order_index', sd.order_index))
                FILTER (WHERE sd.id IS NOT NULL),
@@ -1039,7 +1203,6 @@ app.get('/api/projects', asyncHandler(async (req, res) => {
     FROM project p
     LEFT JOIN project_part pp ON pp.project_id=p.id
     LEFT JOIN project_checklist_item pc ON pc.project_id=p.id
-    LEFT JOIN project_next_step ns ON ns.project_id=p.id
     LEFT JOIN project_step ps ON ps.project_id=p.id
     LEFT JOIN step_definition sd ON sd.id=ps.step_definition_id
     GROUP BY p.id
@@ -1080,7 +1243,7 @@ app.post('/api/projects', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/projects/:id', asyncHandler(async (req, res) => {
-  const [projectResult, parts, files, checklist, nextSteps, steps] = await Promise.all([
+  const [projectResult, parts, files, checklist, steps] = await Promise.all([
     pool.query(`SELECT * FROM project WHERE id=$1`, [req.params.id]),
     pool.query(
       `SELECT pp.id AS project_part_id, p.*,
@@ -1100,7 +1263,6 @@ app.get('/api/projects/:id', asyncHandler(async (req, res) => {
        ORDER BY is_completed, order_index, id`,
       [req.params.id],
     ),
-    pool.query(`SELECT * FROM project_next_step WHERE project_id=$1 ORDER BY is_completed, priority DESC, order_index, id`, [req.params.id]),
     pool.query(
       `SELECT sd.*
        FROM project_step ps
@@ -1116,7 +1278,6 @@ app.get('/api/projects/:id', asyncHandler(async (req, res) => {
     parts: parts.rows,
     files: files.rows,
     checklist: checklist.rows,
-    next_steps: nextSteps.rows,
     steps: steps.rows,
   });
 }));
@@ -1143,7 +1304,7 @@ app.delete('/api/projects/:id', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
-  const [projectResult, parts, files, checklist, nextSteps, steps, docs, categories] = await Promise.all([
+  const [projectResult, parts, files, checklist, steps, docs, categories] = await Promise.all([
     pool.query(`SELECT * FROM project WHERE id=$1`, [req.params.id]),
     pool.query(
       `SELECT pp.id AS project_part_id, p.*,
@@ -1158,7 +1319,6 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
     ),
     pool.query(`SELECT * FROM project_file WHERE project_id=$1 ORDER BY file_category, uploaded_at DESC`, [req.params.id]),
     pool.query(`SELECT * FROM project_checklist_item WHERE project_id=$1 ORDER BY is_completed, order_index, id`, [req.params.id]),
-    pool.query(`SELECT * FROM project_next_step WHERE project_id=$1 ORDER BY is_completed, priority DESC, order_index, id`, [req.params.id]),
     pool.query(
       `SELECT sd.*
        FROM project_step ps
@@ -1205,7 +1365,7 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
     };
   });
   const manifest = {
-    type: 'projecttrack-project-export',
+    type: 'buildbook-web-project-export',
     version: APP_VERSION,
     exported_at: new Date().toISOString(),
     project: {
@@ -1224,12 +1384,6 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       text: item.text,
       is_completed: item.is_completed,
       completed_at: item.completed_at,
-      order_index: item.order_index,
-    })),
-    next_steps: nextSteps.rows.map((item) => ({
-      text: item.text,
-      is_completed: item.is_completed,
-      priority: item.priority,
       order_index: item.order_index,
     })),
     files: latestFiles.map((file) => ({
@@ -1265,7 +1419,6 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
 <h2>Step Tags</h2><p>${steps.rows.map((step) => step.name).join(', ') || 'None'}</p>
 <h2>Notes</h2><div class="box">${project.notes || '<p>No notes.</p>'}</div>
 <h2>Checklist</h2><ul>${checklist.rows.map((item) => `<li>${item.is_completed ? '[x]' : '[ ]'} ${item.text}${item.completed_at ? ` (${new Date(item.completed_at).toLocaleDateString()})` : ''}</li>`).join('') || '<li>No checklist items.</li>'}</ul>
-<h2>Next Steps</h2><ul>${nextSteps.rows.map((item) => `<li>${item.is_completed ? '[x]' : '[ ]'} ${item.text}</li>`).join('') || '<li>No next steps.</li>'}</ul>
 <h2>Linked Parts</h2>${partRows.map((part) => `<div class="box"><strong>${part.name}</strong><br><span class="muted">${part.category_label} | ${part.storage_location || 'No location'}</span>${part.product_url ? `<br><a href="${part.product_url}">${part.product_url}</a>` : ''}<pre>${part.spec_summary || ''}</pre></div>`).join('') || '<p>No linked parts.</p>'}
 <h2>Latest Files</h2><ul>${latestFiles.map((file) => `<li>${file.file_category}: ${file.original_filename}${file.version_note ? ` - ${file.version_note}` : ''}</li>`).join('') || '<li>No latest files.</li>'}</ul>
 </body></html>`;
@@ -1327,9 +1480,11 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
 async function loadProjectManifest(zipPath) {
   const directory = await unzipper.Open.file(zipPath);
   const entry = directory.files.find((file) => file.path === 'project-manifest.json');
-  if (!entry) throw new Error('This zip does not include a project manifest. Export it again with ProjectTrack 0.2.1 or newer.');
+  if (!entry) throw new Error('This zip does not include a project manifest. Export it again with BuildBook_Web 0.2.1 or newer.');
   const manifest = JSON.parse((await entry.buffer()).toString('utf-8'));
-  if (manifest.type !== 'projecttrack-project-export') throw new Error('This is not a ProjectTrack project export.');
+  if (manifest.type !== 'buildbook-web-project-export') {
+    throw new Error('This is not a BuildBook_Web project export.');
+  }
   return { manifest, directory };
 }
 
@@ -1509,14 +1664,6 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
         `INSERT INTO project_checklist_item (project_id, text, is_completed, completed_at, order_index)
          VALUES ($1,$2,$3,$4,$5)`,
         [project.id, item.text, !!item.is_completed, item.completed_at || null, item.order_index || 0],
-      );
-    }
-
-    for (const item of manifest.next_steps || []) {
-      await client.query(
-        `INSERT INTO project_next_step (project_id, text, is_completed, priority, order_index)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [project.id, item.text, !!item.is_completed, item.priority || 0, item.order_index || 0],
       );
     }
 
@@ -1736,34 +1883,6 @@ app.delete('/api/checklist/:id', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.post('/api/projects/:id/next-steps', asyncHandler(async (req, res) => {
-  const { text, priority, order_index } = req.body;
-  if (!text?.trim()) return res.status(400).json({ error: 'Next step text is required' });
-  const { rows } = await pool.query(
-    `INSERT INTO project_next_step (project_id, text, priority, order_index)
-     VALUES ($1,$2,$3,$4) RETURNING *`,
-    [req.params.id, text.trim(), priority ?? 0, order_index ?? 0],
-  );
-  res.json(rows[0]);
-}));
-
-app.put('/api/next-steps/:id', asyncHandler(async (req, res) => {
-  const { text, is_completed, priority, order_index } = req.body;
-  const { rows } = await pool.query(
-    `UPDATE project_next_step
-     SET text=COALESCE($1,text), is_completed=COALESCE($2,is_completed),
-         priority=COALESCE($3,priority), order_index=COALESCE($4,order_index)
-     WHERE id=$5 RETURNING *`,
-    [text ?? null, is_completed ?? null, priority ?? null, order_index ?? null, req.params.id],
-  );
-  res.json(rows[0]);
-}));
-
-app.delete('/api/next-steps/:id', asyncHandler(async (req, res) => {
-  await pool.query(`DELETE FROM project_next_step WHERE id=$1`, [req.params.id]);
-  res.json({ ok: true });
-}));
-
 app.get('/api/step-definitions', asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM step_definition ORDER BY order_index, name`);
   res.json(rows);
@@ -1922,6 +2041,54 @@ app.get('/api/imports/:id', asyncHandler(async (req, res) => {
   res.json({ ...batch.rows[0], items: items.rows });
 }));
 
+app.post('/api/import-items/:id/find-image', asyncHandler(async (req, res) => {
+  const { rows: [item] } = await pool.query(`SELECT * FROM import_item WHERE id=$1`, [req.params.id]);
+  if (!item) return res.status(404).json({ error: 'Import item not found' });
+  if (item.product_image_url) return res.json({ ok: true, found: false, image_url: item.product_image_url, item });
+
+  const imageUrl = await findWebImageForImportItem(item);
+  if (!imageUrl) return res.json({ ok: true, found: false, image_url: null, item });
+
+  const { rows: [updated] } = await pool.query(
+    `UPDATE import_item SET product_image_url=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
+    [imageUrl, item.id],
+  );
+  res.json({ ok: true, found: true, image_url: imageUrl, item: updated });
+}));
+
+app.post('/api/imports/:id/find-missing-images', asyncHandler(async (req, res) => {
+  const params = [];
+  let where = `(product_image_url IS NULL OR product_image_url = '') AND status='draft'`;
+  if (req.params.id !== 'all') {
+    params.push(req.params.id);
+    where += ` AND import_batch_id=$${params.length}`;
+  }
+
+  const { rows } = await pool.query(
+    `SELECT * FROM import_item WHERE ${where} ORDER BY id`,
+    params,
+  );
+
+  let found = 0;
+  let failed = 0;
+  const items = [];
+  for (const item of rows) {
+    const imageUrl = await findWebImageForImportItem(item);
+    if (!imageUrl) {
+      failed += 1;
+      items.push({ id: item.id, found: false, image_url: null });
+      continue;
+    }
+    await pool.query(
+      `UPDATE import_item SET product_image_url=$1, updated_at=NOW() WHERE id=$2`,
+      [imageUrl, item.id],
+    );
+    found += 1;
+    items.push({ id: item.id, found: true, image_url: imageUrl });
+  }
+  res.json({ ok: true, checked: rows.length, found, failed, items });
+}));
+
 app.post('/api/import-items/:id/promote', asyncHandler(async (req, res) => {
   const { category_id, name, notes, spec_summary, storage_location } = req.body;
   const client = await pool.connect();
@@ -2032,27 +2199,30 @@ app.get('/api/settings/backup', asyncHandler(async (req, res) => {
     'project_part',
     'project_file',
     'project_checklist_item',
-    'project_next_step',
     'step_definition',
     'project_step',
     'import_batch',
     'import_item',
   ];
-  const data = { type: 'electronics-project-tracker-backup', version: 2, exported_at: new Date().toISOString() };
+  const backupOrderBy = {
+    app_metadata: 'key',
+    project_step: 'project_id, step_definition_id',
+  };
+  const data = { type: 'buildbook-web-backup', version: 2, exported_at: new Date().toISOString() };
   for (const table of tables) {
-    const { rows } = table === 'app_metadata'
-      ? await pool.query(`SELECT * FROM app_metadata WHERE key <> 'schema_version' ORDER BY key`)
-      : await pool.query(`SELECT * FROM ${table} ORDER BY id`);
+    const where = table === 'app_metadata' ? ` WHERE key <> 'schema_version'` : '';
+    const orderBy = backupOrderBy[table] || 'id';
+    const { rows } = await pool.query(`SELECT * FROM ${table}${where} ORDER BY ${orderBy}`);
     data[table] = rows;
   }
-  res.setHeader('Content-Disposition', `attachment; filename="electronics-tracker-backup-${Date.now()}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="buildbook-web-backup-${Date.now()}.json"`);
   res.json(data);
 }));
 
 app.post('/api/settings/restore', uploadCsv.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Backup file is required' });
   const data = JSON.parse(req.file.buffer.toString('utf-8'));
-  if (data.type !== 'electronics-project-tracker-backup' || data.version !== 2) {
+  if (data.type !== 'buildbook-web-backup' || data.version !== 2) {
     return res.status(400).json({ error: 'Not a v2 backup file' });
   }
   const client = await pool.connect();
@@ -2061,7 +2231,6 @@ app.post('/api/settings/restore', uploadCsv.single('file'), asyncHandler(async (
     const wipe = [
       'import_item',
       'import_batch',
-      'project_next_step',
       'project_step',
       'project_checklist_item',
       'project_file',
@@ -2098,7 +2267,6 @@ app.post('/api/settings/restore', uploadCsv.single('file'), asyncHandler(async (
     const seqTables = [
       'import_item',
       'import_batch',
-      'project_next_step',
       'project_checklist_item',
       'project_file',
       'project_part',
@@ -2132,4 +2300,4 @@ app.use((err, req, res, next) => {
 });
 
 await ensureRuntimeSchema();
-app.listen(PORT, () => console.log(`Electronics Project Tracker backend on :${PORT}`));
+app.listen(PORT, () => console.log(`BuildBook_Web backend on :${PORT}`));

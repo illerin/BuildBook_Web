@@ -1,8 +1,8 @@
-# ProjectTrack — Electronics Project Documentation Tracker
+# BuildBook_Web - Electronics Project Documentation Tracker
 
 A self-hosted web app for documenting electronics projects and keeping a searchable reference library of parts, datasheets, product links, files, and notes.
 
-This rebuild intentionally removes inventory quantity tracking. Parts are reference records, not stock records.
+BuildBook_Web intentionally removes inventory quantity tracking. Parts are reference records, not stock records.
 
 ## Quick Start
 
@@ -74,7 +74,6 @@ The v2 schema is centered on:
 - `project_part`
 - `project_file`
 - `project_checklist_item`
-- `project_next_step`
 - `import_batch`
 - `import_item`
 
@@ -84,7 +83,7 @@ On first v2 startup, the schema migration drops the old v1 inventory/order table
 
 Docker Compose mounts:
 
-- `parttrack-uploads` for uploaded images, project files, and part documents
-- `parttrack-pgdata` for PostgreSQL data
+- `buildbook-web-uploads` for uploaded images, project files, and part documents
+- `buildbook-web-pgdata` for PostgreSQL data
 
 Keep both volumes if you want to preserve the app state.

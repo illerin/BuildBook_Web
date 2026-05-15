@@ -1,4 +1,4 @@
--- Electronics Project Tracker v2 schema
+-- BuildBook_Web v2 schema
 -- This file is run on every container start. The reset block only runs when the
 -- v2 marker is missing, so data is preserved after the first v2 boot.
 
@@ -39,6 +39,8 @@ BEGIN
         SET value = EXCLUDED.value, updated_at = NOW();
     END IF;
 END $$;
+
+DROP TABLE IF EXISTS project_next_step CASCADE;
 
 CREATE TABLE IF NOT EXISTS category (
     id SERIAL PRIMARY KEY,
@@ -133,16 +135,6 @@ CREATE TABLE IF NOT EXISTS project_checklist_item (
 
 ALTER TABLE project_checklist_item
 ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
-
-CREATE TABLE IF NOT EXISTS project_next_step (
-    id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-    text TEXT NOT NULL,
-    is_completed BOOLEAN NOT NULL DEFAULT FALSE,
-    priority INTEGER NOT NULL DEFAULT 0,
-    order_index INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 CREATE TABLE IF NOT EXISTS step_definition (
     id SERIAL PRIMARY KEY,

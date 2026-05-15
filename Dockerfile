@@ -36,7 +36,7 @@ RUN chmod +x /entrypoint.sh
 
 EXPOSE 8080
 
-ENV DATABASE_URL=postgresql://parttrack:parttrack@localhost:5432/parttrack
+ENV DATABASE_URL=postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web
 ENV UPLOAD_DIR=/app/uploads
 ENV PORT=3001
 

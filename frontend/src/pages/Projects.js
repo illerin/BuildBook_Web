@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE, api } from '../api/client';
+import ModalOverlay from '../components/ModalOverlay';
 
 const STATUS_LABEL = {
   active: 'Active',
@@ -137,7 +138,7 @@ function NewProjectModal({ onClose }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal">
         <h2>New Project</h2>
         {err && <div className="alert alert-error">{err}</div>}
@@ -158,7 +159,7 @@ function NewProjectModal({ onClose }) {
           <button className="btn btn-primary" onClick={create}>Create</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -237,7 +238,7 @@ function ImportProjectModal({ onClose, onImported }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal large-modal">
         <div className="card-header">
           <h2>Import Project</h2>
@@ -248,7 +249,7 @@ function ImportProjectModal({ onClose, onImported }) {
         {!preview ? (
           <>
             <p className="muted">
-              Import a ProjectTrack export zip to recreate the project notes, latest files, checklist, step tags, linked parts, datasheets, and part details.
+              Import a BuildBook_Web export zip to recreate the project notes, latest files, checklist, step tags, linked parts, datasheets, and part details.
             </p>
             <div className="upload-line">
               <input type="file" accept=".zip,application/zip" onChange={(e) => setFile(e.target.files[0])} />
@@ -322,6 +323,6 @@ function ImportProjectModal({ onClose, onImported }) {
           </>
         )}
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

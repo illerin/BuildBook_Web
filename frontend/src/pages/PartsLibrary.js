@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { API_BASE, api } from '../api/client';
+import ModalOverlay from '../components/ModalOverlay';
 
 function imageUrl(path) {
   return path ? `${API_BASE}/files/images/${path}` : '';
@@ -50,21 +51,44 @@ function totalTreeCount(node) {
   return node.part_count + node.children.reduce((sum, child) => sum + totalTreeCount(child), 0);
 }
 
-function CategoryTreeNode({ node, activeId, onSelect, depth = 0 }) {
+function CategoryTreeNode({ node, activeId, onSelect, onDropPart, dragOverCategoryId, setDragOverCategoryId, depth = 0 }) {
   const [open, setOpen] = useState(false);
   const hasChildren = node.children.length > 0;
+  const isDragOver = String(dragOverCategoryId) === String(node.id);
   return (
     <div>
       <div className="category-tree-line" style={{ paddingLeft: `${depth * 14}px` }}>
         {hasChildren ? (
           <button className="tree-toggle" onClick={() => setOpen((value) => !value)}>{open ? '-' : '+'}</button>
         ) : <span className="tree-toggle-spacer" />}
-        <button className={`category-row tree-row ${String(activeId) === String(node.id) ? 'active' : ''}`} onClick={() => onSelect(node.id)}>
+        <button
+          className={`category-row tree-row ${String(activeId) === String(node.id) ? 'active' : ''} ${isDragOver ? 'drop-target' : ''}`}
+          onClick={() => onSelect(node.id)}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOverCategoryId(node.id);
+          }}
+          onDragLeave={() => setDragOverCategoryId((current) => (String(current) === String(node.id) ? '' : current))}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOverCategoryId('');
+            onDropPart(node.id, e);
+          }}
+        >
           {node.name} <span>{totalTreeCount(node)}</span>
         </button>
       </div>
       {open && hasChildren && node.children.map((child) => (
-        <CategoryTreeNode key={child.id} node={child} activeId={activeId} onSelect={onSelect} depth={depth + 1} />
+        <CategoryTreeNode
+          key={child.id}
+          node={child}
+          activeId={activeId}
+          onSelect={onSelect}
+          onDropPart={onDropPart}
+          dragOverCategoryId={dragOverCategoryId}
+          setDragOverCategoryId={setDragOverCategoryId}
+          depth={depth + 1}
+        />
       ))}
     </div>
   );
@@ -243,7 +267,7 @@ function CategoryManagerModal({ categories, onClose, onChanged }) {
   );
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal category-manager-modal">
         <div className="card-header">
           <h2>Edit Categories</h2>
@@ -340,7 +364,7 @@ function CategoryManagerModal({ categories, onClose, onChanged }) {
           <button className="btn btn-secondary" onClick={onClose}>Close</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -355,16 +379,20 @@ export default function PartsLibrary() {
   const [editingPart, setEditingPart] = useState(null);
   const [editingCategories, setEditingCategories] = useState(false);
   const [detailId, setDetailId] = useState(searchParams.get('part'));
+  const [dragPartId, setDragPartId] = useState('');
+  const [dragOverCategoryId, setDragOverCategoryId] = useState('');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (showSpinner = true) => {
+    if (showSpinner) setLoading(true);
     const [cats, rows] = await Promise.all([
       api.getCategories(),
       api.getParts({ search, category, uncategorized: showUnassigned ? 'true' : undefined }),
     ]);
     setCategories(cats);
     setParts(rows);
-    setLoading(false);
+    if (showSpinner) setLoading(false);
   }, [search, category, showUnassigned]);
 
   useEffect(() => { load(); }, [load]);
@@ -393,6 +421,45 @@ export default function PartsLibrary() {
     setShowUnassigned(true);
     setCategory('');
   };
+  const flash = (text, isErr = false) => {
+    if (isErr) setErr(text); else setMsg(text);
+    setTimeout(() => {
+      setMsg('');
+      setErr('');
+    }, 3500);
+  };
+  const movePartToCategory = async (targetCategoryId, e) => {
+    const sourceId = e?.dataTransfer?.getData('application/x-buildbook-part-id') || dragPartId;
+    const part = parts.find((row) => String(row.id) === String(sourceId));
+    if (!part) return;
+    const nextCategoryId = targetCategoryId || null;
+    if (String(part.category_id || '') === String(nextCategoryId || '')) return;
+    const scrollContainer = document.querySelector('.content');
+    const scrollTop = scrollContainer?.scrollTop || 0;
+    try {
+      await api.updatePart(part.id, {
+        name: part.name,
+        category_id: nextCategoryId,
+        product_url: part.product_url || '',
+        storage_location: part.storage_location || '',
+        notes: part.notes || '',
+        spec_summary: part.spec_summary || '',
+      });
+      const categoryName = nextCategoryId
+        ? categoryOptions.find((cat) => String(cat.id) === String(nextCategoryId))?.label || 'category'
+        : 'Unassigned';
+      flash(`Moved "${part.name}" to ${categoryName}.`);
+      await load(false);
+      requestAnimationFrame(() => {
+        if (scrollContainer) scrollContainer.scrollTop = scrollTop;
+      });
+    } catch (error) {
+      flash(error.message, true);
+    } finally {
+      setDragPartId('');
+      setDragOverCategoryId('');
+    }
+  };
 
   return (
     <div>
@@ -406,6 +473,9 @@ export default function PartsLibrary() {
           <button className="btn btn-primary" onClick={() => setEditingPart({})}>New Part</button>
         </div>
       </div>
+
+      {msg && <div className="alert alert-success">{msg}</div>}
+      {err && <div className="alert alert-error">{err}</div>}
 
       <div className="filters">
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search parts, notes, specs..." />
@@ -426,7 +496,20 @@ export default function PartsLibrary() {
           <button className={`category-row ${category === '' && !showUnassigned ? 'active' : ''}`} onClick={() => setCategoryFilter('')}>
             All parts <span>{parts.length}</span>
           </button>
-          <button className={`category-row ${showUnassigned ? 'active' : ''}`} onClick={setUnassignedFilter}>
+          <button
+            className={`category-row ${showUnassigned ? 'active' : ''} ${dragOverCategoryId === '__unassigned' ? 'drop-target' : ''}`}
+            onClick={setUnassignedFilter}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOverCategoryId('__unassigned');
+            }}
+            onDragLeave={() => setDragOverCategoryId((current) => (current === '__unassigned' ? '' : current))}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOverCategoryId('');
+              movePartToCategory(null, e);
+            }}
+          >
             Unassigned <span>{showUnassigned ? parts.length : unassignedCount}</span>
           </button>
           <div className="category-tree">
@@ -436,6 +519,9 @@ export default function PartsLibrary() {
                 node={node}
                 activeId={category}
                 onSelect={setCategoryFilter}
+                onDropPart={movePartToCategory}
+                dragOverCategoryId={dragOverCategoryId}
+                setDragOverCategoryId={setDragOverCategoryId}
               />
             ))}
           </div>
@@ -446,7 +532,22 @@ export default function PartsLibrary() {
             parts.length === 0 ? <div className="empty">No parts found.</div> : (
               <div className="item-grid">
                 {parts.map((part) => (
-                  <button key={part.id} className="part-card" onClick={() => setDetailId(part.id)}>
+                  <button
+                    key={part.id}
+                    className={`part-card ${String(dragPartId) === String(part.id) ? 'dragging' : ''}`}
+                    draggable
+                    onClick={() => setDetailId(part.id)}
+                    onDragStart={(e) => {
+                      setDragPartId(part.id);
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('application/x-buildbook-part-id', String(part.id));
+                      e.dataTransfer.setData('text/plain', part.name);
+                    }}
+                    onDragEnd={() => {
+                      setDragPartId('');
+                      setDragOverCategoryId('');
+                    }}
+                  >
                     {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : <div className="thumb-placeholder">Part</div>}
                     <div className="part-card-body">
                       <span>{categoryPath(part)}</span>
@@ -510,7 +611,7 @@ function CategoryModal({ category, categories, onClose, onSave }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal">
         <h2>{category ? 'Edit Category' : 'New Category'}</h2>
         {err && <div className="alert alert-error">{err}</div>}
@@ -534,7 +635,7 @@ function CategoryModal({ category, categories, onClose, onSave }) {
           <button className="btn btn-primary" onClick={save}>Save</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -548,7 +649,10 @@ function PartModal({ part, categories, onClose, onSave }) {
     spec_summary: part?.spec_summary || '',
   });
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
   const [scraping, setScraping] = useState(false);
+  const [findingImage, setFindingImage] = useState(false);
+  const [hasImage, setHasImage] = useState(!!part?.image_path);
 
   const set = (key, value) => setForm((p) => ({ ...p, [key]: value }));
 
@@ -572,11 +676,39 @@ function PartModal({ part, categories, onClose, onSave }) {
     }
   };
 
+  const findImage = async () => {
+    if (!part?.id) return;
+    setFindingImage(true);
+    setErr('');
+    setMsg('');
+    try {
+      const result = await api.findPartImage(part.id);
+      if (!result.found) {
+        setErr('No usable image found.');
+        return;
+      }
+      setHasImage(true);
+      setMsg('Image found and saved.');
+    } catch (error) {
+      setErr(error.message);
+    } finally {
+      setFindingImage(false);
+    }
+  };
+
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal large-modal">
-        <h2>{part ? 'Edit Part' : 'New Part'}</h2>
+        <div className="card-header">
+          <h2>{part ? 'Edit Part' : 'New Part'}</h2>
+          {part && !hasImage && (
+            <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
+              {findingImage ? 'Searching...' : 'Find Image'}
+            </button>
+          )}
+        </div>
         {err && <div className="alert alert-error">{err}</div>}
+        {msg && <div className="alert alert-success">{msg}</div>}
         <div className="form-row">
           <div className="form-group">
             <label>Name</label>
@@ -618,7 +750,7 @@ function PartModal({ part, categories, onClose, onSave }) {
           <button className="btn btn-primary" onClick={save}>Save</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -630,11 +762,21 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   const [expandedPdf, setExpandedPdf] = useState(null);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameErr, setNameErr] = useState('');
+  const [findingImage, setFindingImage] = useState(false);
+  const [imageErr, setImageErr] = useState('');
   const fileRef = useRef(null);
+  const nameInputRef = useRef(null);
 
   const load = useCallback(async () => setPart(await api.getPart(partId)), [partId]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.getProjects().then(setProjects); }, []);
+  useEffect(() => {
+    if (editingName) nameInputRef.current?.focus();
+  }, [editingName]);
 
   if (!part) {
     return (
@@ -651,6 +793,50 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     || pdfDocs.find((doc) => doc.is_primary)
     || pdfDocs[0];
 
+  const startNameEdit = () => {
+    setNameDraft(part.name || '');
+    setNameErr('');
+    setEditingName(true);
+  };
+
+  const cancelNameEdit = () => {
+    setNameDraft('');
+    setNameErr('');
+    setEditingName(false);
+  };
+
+  const saveNameEdit = async () => {
+    const nextName = nameDraft.trim();
+    if (!nextName) {
+      setNameErr('Name is required');
+      return;
+    }
+    if (nextName === part.name) {
+      cancelNameEdit();
+      return;
+    }
+    setNameSaving(true);
+    setNameErr('');
+    try {
+      const updated = await api.updatePart(part.id, {
+        name: nextName,
+        category_id: part.category_id || null,
+        product_url: part.product_url || '',
+        storage_location: part.storage_location || '',
+        notes: part.notes || '',
+        spec_summary: part.spec_summary || '',
+      });
+      setPart((current) => ({ ...current, ...updated, documents: current.documents, projects: current.projects }));
+      setEditingName(false);
+      setNameDraft('');
+      onChanged();
+    } catch (error) {
+      setNameErr(error.message);
+    } finally {
+      setNameSaving(false);
+    }
+  };
+
   const uploadImage = async (e) => {
     const selected = e.target.files[0];
     if (!selected) return;
@@ -659,6 +845,24 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     await api.uploadPartImage(part.id, form);
     await load();
     onChanged();
+  };
+
+  const findImage = async () => {
+    setFindingImage(true);
+    setImageErr('');
+    try {
+      const result = await api.findPartImage(part.id);
+      if (!result.found) {
+        setImageErr('No usable image found.');
+        return;
+      }
+      await load();
+      onChanged();
+    } catch (error) {
+      setImageErr(error.message);
+    } finally {
+      setFindingImage(false);
+    }
   };
 
   const uploadDoc = async () => {
@@ -697,17 +901,55 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal detail-modal">
         <div className="detail-header">
-          {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : <div className="detail-placeholder">Part</div>}
+          <div className="detail-image-slot">
+            {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : (
+              <div className="detail-placeholder">
+                <span>Part</span>
+                <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
+                  {findingImage ? 'Searching...' : 'Find Image'}
+                </button>
+              </div>
+            )}
+            {imageErr && <small className="inline-error">{imageErr}</small>}
+          </div>
           <div>
             <span>{categoryPath(part)}</span>
-            <h2>{part.name}</h2>
+            {editingName ? (
+              <div className="quick-title-edit">
+                <input
+                  ref={nameInputRef}
+                  value={nameDraft}
+                  disabled={nameSaving}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={saveNameEdit}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      saveNameEdit();
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      cancelNameEdit();
+                    }
+                  }}
+                />
+                {nameErr && <small className="inline-error">{nameErr}</small>}
+              </div>
+            ) : (
+              <h2 className="quick-edit-title" title="Double-click to rename" onDoubleClick={startNameEdit}>{part.name}</h2>
+            )}
             <p>{part.storage_location || 'No location set'}</p>
             {part.product_url && <a href={part.product_url} target="_blank" rel="noreferrer">Open product page</a>}
           </div>
           <div className="detail-actions">
+            {!part.image_path && (
+              <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
+                {findingImage ? 'Searching...' : 'Find Image'}
+              </button>
+            )}
             <button className="btn btn-secondary btn-sm" onClick={() => fileRef.current.click()}>Image</button>
             <button className="btn btn-secondary btn-sm" onClick={() => onEdit(part)}>Edit</button>
             <button className="btn btn-danger btn-sm" onClick={removePart}>Delete</button>
@@ -801,7 +1043,7 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
           </section>
         )}
         {expandedPdf && (
-          <div className="pdf-expanded-overlay" onClick={(e) => e.target === e.currentTarget && setExpandedPdf(null)}>
+          <ModalOverlay className="pdf-expanded-overlay" onClose={() => setExpandedPdf(null)}>
             <div className="pdf-expanded-modal">
               <div className="viewer-toolbar">
                 <strong>{expandedPdf.original_filename}</strong>
@@ -810,9 +1052,9 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
               </div>
               <iframe title={expandedPdf.original_filename} src={docUrl(expandedPdf.file_path)} />
             </div>
-          </div>
+          </ModalOverlay>
         )}
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

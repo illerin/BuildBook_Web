@@ -8,14 +8,14 @@ import Search from './pages/Search';
 import Settings from './pages/Settings';
 import './App.css';
 
-const APP_VERSION = '0.2.4';
+const APP_VERSION = '0.2.5';
 
 export default function App() {
   return (
     <BrowserRouter>
       <div className="app">
         <nav className="sidebar">
-          <div className="logo">ProjectTrack <span>v{APP_VERSION}</span></div>
+          <div className="logo">BuildBook_Web <span>v{APP_VERSION}</span></div>
           <NavLink to="/projects" className={({ isActive }) => isActive ? 'active' : ''}>Projects</NavLink>
           <NavLink to="/parts" className={({ isActive }) => isActive ? 'active' : ''}>Parts Library</NavLink>
           <NavLink to="/search" className={({ isActive }) => isActive ? 'active' : ''}>Search</NavLink>

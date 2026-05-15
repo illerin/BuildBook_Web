@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { API_BASE, api } from '../api/client';
 import RichEditor from '../components/RichEditor';
+import ModalOverlay from '../components/ModalOverlay';
 
 const STATUS_LABEL = {
   active: 'Active',
@@ -951,7 +952,7 @@ function PartInfoModal({ partId, onClose, onRemove }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal detail-modal">
         {!part ? <div className="loading">Loading...</div> : (
           <>
@@ -1025,7 +1026,7 @@ function PartInfoModal({ partId, onClose, onRemove }) {
               </section>
             </div>
             {expandedPdf && (
-              <div className="pdf-expanded-overlay" onClick={(e) => e.target === e.currentTarget && setExpandedPdf(null)}>
+              <ModalOverlay className="pdf-expanded-overlay" onClose={() => setExpandedPdf(null)}>
                 <div className="pdf-expanded-modal">
                   <div className="viewer-toolbar">
                     <strong>{expandedPdf.original_filename}</strong>
@@ -1034,12 +1035,12 @@ function PartInfoModal({ partId, onClose, onRemove }) {
                   </div>
                   <iframe title={expandedPdf.original_filename} src={documentUrl(expandedPdf.file_path)} />
                 </div>
-              </div>
+              </ModalOverlay>
             )}
           </>
         )}
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -1165,7 +1166,7 @@ function TrackerEditorModal({ template, onClose, onSave }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal large-modal">
         <h2>Edit Tracked File Types</h2>
         {err && <div className="alert alert-error">{err}</div>}
@@ -1182,7 +1183,7 @@ function TrackerEditorModal({ template, onClose, onSave }) {
           <button className="btn btn-primary" onClick={save}>Save File Types</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -1197,7 +1198,7 @@ function ProjectMetaModal({ project, onClose, onSave }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal">
         <h2>Edit Project</h2>
         {err && <div className="alert alert-error">{err}</div>}
@@ -1216,7 +1217,7 @@ function ProjectMetaModal({ project, onClose, onSave }) {
           <button className="btn btn-primary" onClick={save}>Save</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -1242,7 +1243,7 @@ function AddPartModal({ project, onClose, onSave }) {
   const already = new Set(project.parts.map((part) => part.id));
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal large-modal">
         <h2>Link Part</h2>
         <div className="form-group">
@@ -1267,6 +1268,6 @@ function AddPartModal({ project, onClose, onSave }) {
           <button className="btn btn-secondary" onClick={onClose}>Close</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }

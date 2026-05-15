@@ -1,6 +1,6 @@
 {
-  "name": "parttrack-backend",
-  "version": "0.2.4",
+  "name": "buildbook-web-backend",
+  "version": "0.2.5",
   "type": "module",
   "scripts": {
     "start": "node server.js",

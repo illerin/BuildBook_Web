@@ -2,9 +2,9 @@
 set -e
 
 PGDATA=/var/lib/postgresql/data
-PG_USER=parttrack
-PG_DB=parttrack
-PG_PASS=parttrack
+PG_USER=buildbook_web
+PG_DB=buildbook_web
+PG_PASS=buildbook_web
 PG_LOG=/var/lib/postgresql/postgresql.log
 
 # Create runtime dir postgres needs for its socket/lock file

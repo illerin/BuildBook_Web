@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import ModalOverlay from '../components/ModalOverlay';
 
 function Section({ title, description, children }) {
   return (
@@ -114,7 +115,7 @@ function ProjectTemplateModal({ onClose }) {
   };
 
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <ModalOverlay onClose={onClose}>
       <div className="modal template-modal">
         <div className="card-header">
           <h2>Project Template</h2>
@@ -180,7 +181,7 @@ function ProjectTemplateModal({ onClose }) {
           <button className="btn btn-primary" disabled={!template || saving} onClick={save}>{saving ? 'Saving...' : 'Save Template'}</button>
         </div>
       </div>
-    </div>
+    </ModalOverlay>
   );
 }
 
@@ -244,7 +245,7 @@ function ReadmeSection() {
   return (
     <Section
       title="Quick Notes"
-      description="ProjectTrack is for documenting electronics builds: projects hold notes, latest files, linked parts, datasheets, and checklist progress."
+      description="BuildBook_Web is for documenting electronics builds: projects hold notes, latest files, linked parts, datasheets, and checklist progress."
     >
       <div className="settings-list">
         <span>Use Project Template to tune default steps, checklist items, and tracked file types.</span>
