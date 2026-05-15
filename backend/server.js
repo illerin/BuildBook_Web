@@ -14,7 +14,7 @@ import crypto from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.5';
+const APP_VERSION = '0.2.6';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -160,6 +160,7 @@ async function getProjectTemplate() {
 
 async function ensureRuntimeSchema() {
   await pool.query(`ALTER TABLE category ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE project_part ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS tracker_key TEXT`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS file_type TEXT NOT NULL DEFAULT 'file'`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS version_note TEXT`);
@@ -1246,7 +1247,7 @@ app.get('/api/projects/:id', asyncHandler(async (req, res) => {
   const [projectResult, parts, files, checklist, steps] = await Promise.all([
     pool.query(`SELECT * FROM project WHERE id=$1`, [req.params.id]),
     pool.query(
-      `SELECT pp.id AS project_part_id, p.*,
+      `SELECT pp.id AS project_part_id, pp.quantity, p.*,
               c.name AS category_name, parent.name AS parent_category_name
        FROM project_part pp
        JOIN part p ON p.id=pp.part_id
@@ -1307,7 +1308,7 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
   const [projectResult, parts, files, checklist, steps, docs, categories] = await Promise.all([
     pool.query(`SELECT * FROM project WHERE id=$1`, [req.params.id]),
     pool.query(
-      `SELECT pp.id AS project_part_id, p.*,
+      `SELECT pp.id AS project_part_id, pp.quantity, p.*,
               c.id AS category_id, c.name AS category_name, parent.name AS parent_category_name
        FROM project_part pp
        JOIN part p ON p.id=pp.part_id
@@ -1399,6 +1400,7 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
     })),
     parts: partRows.map((part) => ({
       name: part.name,
+      quantity: part.quantity || 1,
       category_path: part.category_path,
       category_label: part.category_label,
       product_url: part.product_url,
@@ -1419,7 +1421,7 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
 <h2>Step Tags</h2><p>${steps.rows.map((step) => step.name).join(', ') || 'None'}</p>
 <h2>Notes</h2><div class="box">${project.notes || '<p>No notes.</p>'}</div>
 <h2>Checklist</h2><ul>${checklist.rows.map((item) => `<li>${item.is_completed ? '[x]' : '[ ]'} ${item.text}${item.completed_at ? ` (${new Date(item.completed_at).toLocaleDateString()})` : ''}</li>`).join('') || '<li>No checklist items.</li>'}</ul>
-<h2>Linked Parts</h2>${partRows.map((part) => `<div class="box"><strong>${part.name}</strong><br><span class="muted">${part.category_label} | ${part.storage_location || 'No location'}</span>${part.product_url ? `<br><a href="${part.product_url}">${part.product_url}</a>` : ''}<pre>${part.spec_summary || ''}</pre></div>`).join('') || '<p>No linked parts.</p>'}
+<h2>Linked Parts</h2>${partRows.map((part) => `<div class="box"><strong>${part.name}</strong><br><span class="muted">Qty ${part.quantity || 1} | ${part.category_label} | ${part.storage_location || 'No location'}</span>${part.product_url ? `<br><a href="${part.product_url}">${part.product_url}</a>` : ''}<pre>${part.spec_summary || ''}</pre></div>`).join('') || '<p>No linked parts.</p>'}
 <h2>Latest Files</h2><ul>${latestFiles.map((file) => `<li>${file.file_category}: ${file.original_filename}${file.version_note ? ` - ${file.version_note}` : ''}</li>`).join('') || '<li>No latest files.</li>'}</ul>
 </body></html>`;
 
@@ -1708,9 +1710,9 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
       }
 
       await client.query(
-        `INSERT INTO project_part (project_id, part_id)
-         VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-        [project.id, part.id],
+        `INSERT INTO project_part (project_id, part_id, quantity)
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [project.id, part.id, importedPart.quantity || 1],
       );
 
       for (const doc of importedPart.documents || []) {
@@ -1779,8 +1781,8 @@ app.post('/api/projects/:id/parts', asyncHandler(async (req, res) => {
   const { part_id } = req.body;
   if (!part_id) return res.status(400).json({ error: 'Part is required' });
   const { rows } = await pool.query(
-    `INSERT INTO project_part (project_id, part_id)
-     VALUES ($1,$2)
+    `INSERT INTO project_part (project_id, part_id, quantity)
+     VALUES ($1,$2,1)
      ON CONFLICT (project_id, part_id) DO UPDATE SET added_at=project_part.added_at
      RETURNING *`,
     [req.params.id, part_id],
@@ -1789,21 +1791,34 @@ app.post('/api/projects/:id/parts', asyncHandler(async (req, res) => {
   res.json(rows[0]);
 }));
 
+app.put('/api/project-parts/:id', asyncHandler(async (req, res) => {
+  const quantity = Math.max(1, Number.parseInt(req.body.quantity, 10) || 1);
+  const { rows } = await pool.query(
+    `UPDATE project_part SET quantity=$1 WHERE id=$2 RETURNING *`,
+    [quantity, req.params.id],
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Project part not found' });
+  res.json(rows[0]);
+}));
+
 app.delete('/api/project-parts/:id', asyncHandler(async (req, res) => {
   await pool.query(`DELETE FROM project_part WHERE id=$1`, [req.params.id]);
   res.json({ ok: true });
 }));
 
-app.post('/api/projects/:id/files', uploadProject.single('file'), asyncHandler(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'File is required' });
+app.post('/api/projects/:id/files', uploadProject.array('files'), asyncHandler(async (req, res) => {
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'File is required' });
   const { tracker_key, file_category, version_note } = req.body;
   const template = await getProjectTemplate();
   const tracker = template.file_trackers.find((item) => item.key === tracker_key);
   const allowed = normalizeExtensions(tracker?.extensions);
-  const uploadedExt = path.extname(req.file.originalname).toLowerCase();
-  if (allowed.length && !allowed.includes(uploadedExt)) {
-    rmUpload(PROJECT_DIR, req.file.filename);
-    return res.status(400).json({ error: `This tracker only accepts ${allowed.join(', ')} files.` });
+  for (const file of files) {
+    const uploadedExt = path.extname(file.originalname).toLowerCase();
+    if (allowed.length && !allowed.includes(uploadedExt)) {
+      files.forEach((uploaded) => rmUpload(PROJECT_DIR, uploaded.filename));
+      return res.status(400).json({ error: `This tracker only accepts ${allowed.join(', ')} files.` });
+    }
   }
 
   const category = tracker ? trackerDisplayName(tracker) : (file_category || 'Other');
@@ -1813,13 +1828,41 @@ app.post('/api/projects/:id/files', uploadProject.single('file'), asyncHandler(a
      WHERE project_id=$1 AND COALESCE(tracker_key, file_category)=COALESCE($2, $3)`,
     [req.params.id, tracker?.key || null, category],
   );
-  const { rows } = await pool.query(
-    `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE) RETURNING *`,
-    [req.params.id, req.file.filename, req.file.originalname, guessFileType(req.file), tracker?.key || null, category, version_note || null],
-  );
+  const relativePaths = (() => {
+    try { return JSON.parse(req.body.relative_paths || '[]'); } catch { return []; }
+  })();
+  const rows = [];
+  for (const [index, file] of files.entries()) {
+    const originalName = String(relativePaths[index] || file.originalname).replace(/\\/g, '/');
+    const inserted = await pool.query(
+      `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE) RETURNING *`,
+      [req.params.id, file.filename, originalName, guessFileType(file), tracker?.key || null, category, version_note || null],
+    );
+    rows.push(inserted.rows[0]);
+  }
   await pool.query(`UPDATE project SET updated_at=NOW() WHERE id=$1`, [req.params.id]);
-  res.json(rows[0]);
+  res.json(files.length === 1 ? rows[0] : rows);
+}));
+
+app.get('/api/project-files/:id/download', asyncHandler(async (req, res) => {
+  const { rows: [file] } = await pool.query(`SELECT * FROM project_file WHERE id=$1`, [req.params.id]);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  const source = path.join(PROJECT_DIR, file.file_path);
+  if (!fs.existsSync(source)) return res.status(404).json({ error: 'File missing on disk' });
+  const ext = path.extname(file.original_filename).toLowerCase();
+  const base = safeZipName(path.basename(file.original_filename, ext));
+  if (ext === '.ino') {
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${base}.zip"`);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => { throw err; });
+    archive.pipe(res);
+    archive.file(source, { name: `${base}/${base}.ino` });
+    await archive.finalize();
+    return;
+  }
+  res.download(source, path.basename(file.original_filename));
 }));
 
 app.delete('/api/project-files/:id', asyncHandler(async (req, res) => {

@@ -649,66 +649,30 @@ function PartModal({ part, categories, onClose, onSave }) {
     spec_summary: part?.spec_summary || '',
   });
   const [err, setErr] = useState('');
-  const [msg, setMsg] = useState('');
-  const [scraping, setScraping] = useState(false);
-  const [findingImage, setFindingImage] = useState(false);
-  const [hasImage, setHasImage] = useState(!!part?.image_path);
+  const [imageFile, setImageFile] = useState(null);
 
   const set = (key, value) => setForm((p) => ({ ...p, [key]: value }));
 
   const save = async () => {
     if (!form.name.trim()) return setErr('Name is required');
     const body = { ...form, category_id: form.category_id || null };
-    if (part) await api.updatePart(part.id, body);
-    else await api.createPart(body);
+    const saved = part ? await api.updatePart(part.id, body) : await api.createPart(body);
+    if (imageFile) {
+      const upload = new FormData();
+      upload.append('image', imageFile);
+      await api.uploadPartImage(saved.id, upload);
+    }
     onSave();
   };
-
-  const scrape = async () => {
-    if (!form.product_url.trim()) return;
-    setScraping(true);
-    try {
-      const result = await api.scrapeSpecPreview(form.product_url);
-      if (result.spec) set('spec_summary', result.spec);
-      else setErr(result.message || 'Could not extract specs from that page');
-    } finally {
-      setScraping(false);
-    }
-  };
-
-  const findImage = async () => {
-    if (!part?.id) return;
-    setFindingImage(true);
-    setErr('');
-    setMsg('');
-    try {
-      const result = await api.findPartImage(part.id);
-      if (!result.found) {
-        setErr('No usable image found.');
-        return;
-      }
-      setHasImage(true);
-      setMsg('Image found and saved.');
-    } catch (error) {
-      setErr(error.message);
-    } finally {
-      setFindingImage(false);
-    }
-  };
+  // TODO(post-MVP): reintroduce automatic spec/image lookup after quality improves.
 
   return (
     <ModalOverlay onClose={onClose}>
       <div className="modal large-modal">
         <div className="card-header">
           <h2>{part ? 'Edit Part' : 'New Part'}</h2>
-          {part && !hasImage && (
-            <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
-              {findingImage ? 'Searching...' : 'Find Image'}
-            </button>
-          )}
         </div>
         {err && <div className="alert alert-error">{err}</div>}
-        {msg && <div className="alert alert-success">{msg}</div>}
         <div className="form-row">
           <div className="form-group">
             <label>Name</label>
@@ -733,13 +697,12 @@ function PartModal({ part, categories, onClose, onSave }) {
           </div>
         </div>
         <div className="form-group">
+          <label>Image</label>
+          <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+        </div>
+        <div className="form-group">
           <label>Spec summary</label>
-          <div className="inline-action">
-            <textarea value={form.spec_summary} onChange={(e) => set('spec_summary', e.target.value)} rows={7} />
-            <button className="btn btn-secondary btn-sm" onClick={scrape} disabled={!form.product_url || scraping}>
-              {scraping ? 'Trying...' : 'Try Import'}
-            </button>
-          </div>
+          <textarea value={form.spec_summary} onChange={(e) => set('spec_summary', e.target.value)} rows={7} />
         </div>
         <div className="form-group">
           <label>Notes</label>
@@ -766,8 +729,6 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
   const [nameErr, setNameErr] = useState('');
-  const [findingImage, setFindingImage] = useState(false);
-  const [imageErr, setImageErr] = useState('');
   const fileRef = useRef(null);
   const nameInputRef = useRef(null);
 
@@ -847,24 +808,6 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     onChanged();
   };
 
-  const findImage = async () => {
-    setFindingImage(true);
-    setImageErr('');
-    try {
-      const result = await api.findPartImage(part.id);
-      if (!result.found) {
-        setImageErr('No usable image found.');
-        return;
-      }
-      await load();
-      onChanged();
-    } catch (error) {
-      setImageErr(error.message);
-    } finally {
-      setFindingImage(false);
-    }
-  };
-
   const uploadDoc = async () => {
     if (!file) return;
     setUploading(true);
@@ -908,12 +851,8 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
             {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : (
               <div className="detail-placeholder">
                 <span>Part</span>
-                <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
-                  {findingImage ? 'Searching...' : 'Find Image'}
-                </button>
               </div>
             )}
-            {imageErr && <small className="inline-error">{imageErr}</small>}
           </div>
           <div>
             <span>{categoryPath(part)}</span>
@@ -945,11 +884,6 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
             {part.product_url && <a href={part.product_url} target="_blank" rel="noreferrer">Open product page</a>}
           </div>
           <div className="detail-actions">
-            {!part.image_path && (
-              <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
-                {findingImage ? 'Searching...' : 'Find Image'}
-              </button>
-            )}
             <button className="btn btn-secondary btn-sm" onClick={() => fileRef.current.click()}>Image</button>
             <button className="btn btn-secondary btn-sm" onClick={() => onEdit(part)}>Edit</button>
             <button className="btn btn-danger btn-sm" onClick={removePart}>Delete</button>

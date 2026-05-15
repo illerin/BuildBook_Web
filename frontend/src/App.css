@@ -242,6 +242,7 @@ tr:last-child td { border-bottom: none; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.8fr); gap: 16px; align-items: start; }
 .notes-card { padding: 0; overflow: hidden; }
 .notes-card h3 { padding: 14px 16px 0; }
+.autosave-status { padding: 8px 16px 12px; color: #8b949e; font-size: 12px; text-align: right; border-top: 1px solid #21262d; }
 .card-title-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .table-card { padding: 0; overflow: hidden; }
 .table-thumb, .empty-thumb { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; background: #21262d; border: 1px solid #30363d; }
@@ -256,6 +257,14 @@ tr:last-child td { border-bottom: none; }
 .linked-remove { position: absolute; right: 4px; top: 4px; background: rgba(13,17,23,0.85); border-radius: 4px; }
 .file-viewer-card { position: sticky; top: 0; }
 .file-viewer-card select { width: 100%; margin-bottom: 10px; }
+.viewer-open-btn { text-decoration: none; color: #fff; }
+.project-part-qty-list { border-bottom: 1px solid #21262d; padding-bottom: 12px; margin-bottom: 12px; }
+.project-part-qty-list h3 { margin-bottom: 8px; }
+.project-part-qty-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid #21262d; }
+.project-part-qty-row:last-child { border-bottom: none; }
+.project-part-qty-row > span { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qty-stepper { display: inline-flex; align-items: center; gap: 4px; }
+.qty-stepper input { width: 56px; text-align: center; }
 .file-preview-frame { width: 100%; height: 620px; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; }
 .file-preview-image { width: 100%; max-height: 620px; object-fit: contain; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; }
 .file-preview-empty { min-height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 18px; }

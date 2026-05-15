@@ -39,11 +39,13 @@ export const api = {
   updatePart: (id, body) => req('PUT', `/parts/${id}`, body),
   deletePart: (id) => req('DELETE', `/parts/${id}`),
   uploadPartImage: (id, form) => req('POST', `/parts/${id}/image`, form, true),
+  // TODO(post-MVP): restore image lookup once product-page/search quality is reliable.
   findPartImage: (id) => req('POST', `/parts/${id}/find-image`),
   deletePartImage: (id) => req('DELETE', `/parts/${id}/image`),
   uploadPartDocument: (id, form) => req('POST', `/parts/${id}/documents`, form, true),
   setPrimaryPartDocument: (id) => req('PUT', `/part-documents/${id}/primary`),
   deletePartDocument: (id) => req('DELETE', `/part-documents/${id}`),
+  // TODO(post-MVP): restore automatic spec import after improving extraction accuracy.
   scrapeSpecPreview: (url) => req('POST', '/scrape-spec', { url }),
 
   getProjects: () => req('GET', '/projects'),
@@ -58,8 +60,10 @@ export const api = {
   deleteProjectImage: (id) => req('DELETE', `/projects/${id}/image`),
   uploadProjectNoteImage: (id, form) => req('POST', `/projects/${id}/note-images`, form, true),
   addProjectPart: (id, body) => req('POST', `/projects/${id}/parts`, body),
+  updateProjectPart: (id, body) => req('PUT', `/project-parts/${id}`, body),
   removeProjectPart: (id) => req('DELETE', `/project-parts/${id}`),
   uploadProjectFile: (id, form) => req('POST', `/projects/${id}/files`, form, true),
+  downloadProjectFileUrl: (id) => `${BASE}/project-files/${id}/download`,
   deleteProjectFile: (id) => req('DELETE', `/project-files/${id}`),
   toggleFileLatest: (id, is_latest) => req('PUT', `/project-files/${id}/latest`, { is_latest }),
   addChecklist: (id, body) => req('POST', `/projects/${id}/checklist`, body),
@@ -75,6 +79,7 @@ export const api = {
   uploadImportCsv: (form) => req('POST', '/imports/upload', form, true),
   uploadDigiKeyPdf: (form) => req('POST', '/imports/digikey-pdf', form, true),
   getImport: (id) => req('GET', `/imports/${id}`),
+  // TODO(post-MVP): restore import image lookup once search/result validation is reliable.
   findImportItemImage: (id) => req('POST', `/import-items/${id}/find-image`),
   findMissingImportImages: (id = 'all') => req('POST', `/imports/${id}/find-missing-images`),
   promoteImportItem: (id, body) => req('POST', `/import-items/${id}/promote`, body),

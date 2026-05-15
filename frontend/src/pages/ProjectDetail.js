@@ -28,6 +28,10 @@ function projectFileUrl(path) {
   return `${API_BASE}/files/projects/${path}`;
 }
 
+function projectFileDownloadUrl(id) {
+  return api.downloadProjectFileUrl(id);
+}
+
 function documentUrl(path) {
   return `${API_BASE}/files/documents/${path}`;
 }
@@ -181,21 +185,38 @@ export default function ProjectDetail() {
 function OverviewTab({ project, setProject, reload, flash }) {
   const [notes, setNotes] = useState(project.notes || '');
   const [savingNotes, setSavingNotes] = useState(false);
+  const [notesStatus, setNotesStatus] = useState('Saved');
 
   useEffect(() => setNotes(project.notes || ''), [project.id, project.notes]);
 
-  const saveNotes = async () => {
+  const saveNotes = useCallback(async (quiet = false) => {
     setSavingNotes(true);
     try {
-      const updated = await api.updateProject(project.id, { ...project, notes });
+      const updated = await api.updateProject(project.id, {
+        name: project.name,
+        status: project.status,
+        notes,
+      });
       setProject((p) => ({ ...p, ...updated, notes }));
-      flash('Notes saved');
+      setNotesStatus('Saved');
+      if (!quiet) flash('Notes saved');
     } catch (e) {
+      setNotesStatus('Could not save');
       flash(e.message, true);
     } finally {
       setSavingNotes(false);
     }
-  };
+  }, [flash, notes, project.id, project.name, project.status, setProject]);
+
+  useEffect(() => {
+    if (notes === (project.notes || '')) {
+      setNotesStatus('Saved');
+      return undefined;
+    }
+    setNotesStatus('Saving...');
+    const timer = setTimeout(() => saveNotes(true), 900);
+    return () => clearTimeout(timer);
+  }, [notes, project.notes, saveNotes]);
 
   const uploadNoteImage = async (file) => {
     const form = new FormData();
@@ -211,11 +232,11 @@ function OverviewTab({ project, setProject, reload, flash }) {
         <RichEditor
           value={notes}
           onChange={setNotes}
-          onSave={saveNotes}
           saving={savingNotes}
           onUploadImage={uploadNoteImage}
           placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..."
         />
+        <div className="autosave-status">{savingNotes ? 'Saving...' : notesStatus}</div>
       </section>
       <div>
         <StepTagsCard project={project} setProject={setProject} />
@@ -360,7 +381,7 @@ function LatestFiles({ files }) {
         <div key={category} className={`latest-group latest-color-${index % 6}`}>
           <h4>{latestFileTypeLabel(category)}</h4>
           {rows.map((file) => (
-            <a key={file.id} className="latest-file-row" href={projectFileUrl(file.file_path)} target="_blank" rel="noreferrer">
+            <a key={file.id} className="latest-file-row" href={projectFileDownloadUrl(file.id)}>
               <strong>{file.original_filename}</strong>
               {file.version_note && <em className="file-note">{file.version_note}</em>}
               <span>{new Date(file.uploaded_at).toLocaleDateString()}</span>
@@ -387,6 +408,11 @@ function PartsTab({ project, onAdd, reload }) {
     reload();
   };
 
+  const updateQuantity = async (projectPartId, quantity) => {
+    await api.updateProjectPart(projectPartId, { quantity });
+    reload();
+  };
+
   return (
     <div className="parts-workspace">
       <div>
@@ -408,6 +434,7 @@ function PartsTab({ project, onAdd, reload }) {
                 <div>
                   <strong>{part.name}</strong>
                   <span>{categoryPath(part)}</span>
+                  <small>Qty {part.quantity || 1}</small>
                   {part.storage_location && <small>{part.storage_location}</small>}
                 </div>
                 <button className="btn-icon linked-remove" onClick={(e) => { e.stopPropagation(); remove(part.project_part_id); }}>x</button>
@@ -417,9 +444,32 @@ function PartsTab({ project, onAdd, reload }) {
         )}
       </div>
       <section className="card file-viewer-card">
+        {project.parts.length > 0 && (
+          <div className="project-part-qty-list">
+            <h3>Build Parts</h3>
+            {project.parts.map((part) => (
+              <div key={part.project_part_id} className="project-part-qty-row">
+                <span>{part.name}</span>
+                <div className="qty-stepper">
+                  <button className="btn btn-secondary btn-sm" onClick={() => updateQuantity(part.project_part_id, Math.max(1, (part.quantity || 1) - 1))}>-</button>
+                  <input
+                    type="number"
+                    min="1"
+                    defaultValue={part.quantity || 1}
+                    onBlur={(e) => updateQuantity(part.project_part_id, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') e.currentTarget.blur();
+                    }}
+                  />
+                  <button className="btn btn-secondary btn-sm" onClick={() => updateQuantity(part.project_part_id, (part.quantity || 1) + 1)}>+</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="card-title-row">
           <h3>File Viewer</h3>
-          {selectedFile && <a className="sub-link" href={projectFileUrl(selectedFile.file_path)} target="_blank" rel="noreferrer">Open</a>}
+          {selectedFile && <a className="btn btn-primary btn-sm viewer-open-btn" href={projectFileUrl(selectedFile.file_path)} target="_blank" rel="noreferrer">Open File</a>}
         </div>
         {viewableFiles.length > 0 ? (
           <>
@@ -1048,7 +1098,7 @@ function FilesTab({ project, reload, flash }) {
   const [template, setTemplate] = useState(null);
   const [trackerKey, setTrackerKey] = useState('');
   const [editingTrackers, setEditingTrackers] = useState(false);
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [versionNote, setVersionNote] = useState('');
 
   useEffect(() => {
@@ -1066,17 +1116,18 @@ function FilesTab({ project, reload, flash }) {
   }, [project.files]);
 
   const upload = async () => {
-    if (!file) return;
+    if (!files.length) return;
     const form = new FormData();
-    form.append('file', file);
+    files.forEach((item) => form.append('files', item));
+    form.append('relative_paths', JSON.stringify(files.map((item) => item.webkitRelativePath || item.name)));
     form.append('version_note', versionNote);
     if (selectedTracker?.key) form.append('tracker_key', selectedTracker.key);
     try {
       await api.uploadProjectFile(project.id, form);
-      setFile(null);
+      setFiles([]);
       setVersionNote('');
       reload();
-      flash('File uploaded and marked latest.');
+      flash(`${files.length} file${files.length === 1 ? '' : 's'} uploaded and marked latest.`);
     } catch (e) {
       flash(e.message, true);
     }
@@ -1099,9 +1150,20 @@ function FilesTab({ project, reload, flash }) {
         <select value={selectedTracker?.key || ''} onChange={(e) => setTrackerKey(e.target.value)}>
           {trackers.map((tracker) => <option key={tracker.key} value={tracker.key}>{trackerLabel(tracker)}</option>)}
         </select>
-        <input type="file" accept={accept} onChange={(e) => setFile(e.target.files[0])} />
+        <input type="file" accept={accept} multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
+        <label className="btn btn-secondary">
+          Folder
+          <input
+            type="file"
+            webkitdirectory=""
+            directory=""
+            multiple
+            hidden
+            onChange={(e) => setFiles(Array.from(e.target.files || []))}
+          />
+        </label>
         <input value={versionNote} onChange={(e) => setVersionNote(e.target.value)} placeholder="Version note, e.g. fixed pinout" />
-        <button className="btn btn-primary" disabled={!file} onClick={upload}>Upload</button>
+        <button className="btn btn-primary" disabled={!files.length} onClick={upload}>Upload{files.length > 1 ? ` ${files.length}` : ''}</button>
         <button className="btn btn-secondary" onClick={() => setEditingTrackers(true)}>Edit File Types</button>
       </section>
       {categories.map((cat) => {
@@ -1113,6 +1175,7 @@ function FilesTab({ project, reload, flash }) {
             {files.map((item) => (
               <div key={item.id} className="file-row">
                 <a href={projectFileUrl(item.file_path)} target="_blank" rel="noreferrer">{item.original_filename}</a>
+                <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(item.id)}>Download</a>
                 <span>{new Date(item.uploaded_at).toLocaleDateString()}</span>
                 {item.version_note && <em className="file-note">{item.version_note}</em>}
                 <button className={`btn btn-sm ${item.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(item)}>
@@ -1223,17 +1286,20 @@ function ProjectMetaModal({ project, onClose, onSave }) {
 
 function AddPartModal({ project, onClose, onSave }) {
   const [search, setSearch] = useState('');
+  const [category, setCategory] = useState('');
+  const [categories, setCategories] = useState([]);
   const [parts, setParts] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => { api.getCategories().then(setCategories); }, []);
   useEffect(() => {
     const timer = setTimeout(async () => {
       setLoading(true);
-      setParts(await api.getParts({ search }));
+      setParts(await api.getParts({ search, category: category || undefined }));
       setLoading(false);
     }, 200);
     return () => clearTimeout(timer);
-  }, [search]);
+  }, [search, category]);
 
   const linkPart = async (part) => {
     await api.addProjectPart(project.id, { part_id: part.id });
@@ -1249,6 +1315,13 @@ function AddPartModal({ project, onClose, onSave }) {
         <div className="form-group">
           <label>Search parts</label>
           <input value={search} onChange={(e) => setSearch(e.target.value)} autoFocus placeholder="Board, MCU, regulator..." />
+        </div>
+        <div className="form-group">
+          <label>Category</label>
+          <select value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="">All categories</option>
+            {categories.map((cat) => <option key={cat.id} value={cat.id}>{cat.label}</option>)}
+          </select>
         </div>
         {loading ? <div className="loading">Loading...</div> : (
           <div className="pick-list">

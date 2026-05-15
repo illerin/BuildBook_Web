@@ -194,7 +194,6 @@ function BatchReview({ batch, onChanged }) {
   const [categories, setCategories] = useState([]);
   const [bulkCategoryId, setBulkCategoryId] = useState('');
   const [busy, setBusy] = useState(false);
-  const [findingImages, setFindingImages] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const groups = useMemo(() => ({
@@ -205,10 +204,6 @@ function BatchReview({ batch, onChanged }) {
   const selectedDraftItems = useMemo(
     () => groups.draft.filter((item) => selectedIds.has(item.id)),
     [groups.draft, selectedIds],
-  );
-  const missingImageCount = useMemo(
-    () => groups.draft.filter((item) => !item.product_image_url).length,
-    [groups.draft],
   );
 
   useEffect(() => { api.getCategories().then(setCategories); }, []);
@@ -276,20 +271,7 @@ function BatchReview({ batch, onChanged }) {
     }
   };
 
-  const findMissingImages = async () => {
-    setFindingImages(true);
-    setMsg('');
-    setErr('');
-    try {
-      const result = await api.findMissingImportImages(batch.id);
-      setMsg(`Checked ${result.checked} item(s). Found ${result.found} image(s). ${result.failed ? `${result.failed} still missing.` : ''}`);
-      await onChanged();
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setFindingImages(false);
-    }
-  };
+  // TODO(post-MVP): restore missing-image search after improving result accuracy.
 
   return (
     <div>
@@ -319,9 +301,6 @@ function BatchReview({ batch, onChanged }) {
           </select>
           <button className="btn btn-secondary btn-sm" onClick={selectAllDrafts}>Select Drafts</button>
           <button className="btn btn-secondary btn-sm" onClick={clearSelection}>Clear</button>
-          <button className="btn btn-secondary btn-sm" disabled={!missingImageCount || findingImages || busy} onClick={findMissingImages}>
-            {findingImages ? 'Searching...' : `Find Missing Images (${missingImageCount})`}
-          </button>
           <button className="btn btn-primary btn-sm" disabled={!selectedDraftItems.length || busy} onClick={createSelected}>
             {busy ? 'Working...' : 'Create Selected'}
           </button>
@@ -353,9 +332,6 @@ function ImportItemCard({ item, selected, onSelectedChange, onChanged }) {
   const [newCategory, setNewCategory] = useState({ name: '', parent_id: '' });
   const [categoryErr, setCategoryErr] = useState('');
   const [autoCategoryId, setAutoCategoryId] = useState('');
-  const [findingImage, setFindingImage] = useState(false);
-  const [imageMsg, setImageMsg] = useState('');
-  const [imageErr, setImageErr] = useState('');
   const [form, setForm] = useState({
     name: item.raw_name,
     category_id: '',
@@ -397,21 +373,7 @@ function ImportItemCard({ item, selected, onSelectedChange, onChanged }) {
     onChanged();
   };
 
-  const findImage = async () => {
-    setFindingImage(true);
-    setImageMsg('');
-    setImageErr('');
-    try {
-      const result = await api.findImportItemImage(item.id);
-      if (result.found || result.image_url) setImageMsg('Image found.');
-      else setImageMsg('No usable image found.');
-      await onChanged();
-    } catch (e) {
-      setImageErr(e.message);
-    } finally {
-      setFindingImage(false);
-    }
-  };
+  // TODO(post-MVP): restore per-item image search after improving result accuracy.
 
   const createCategory = async () => {
     if (!newCategory.name.trim()) {
@@ -465,17 +427,6 @@ function ImportItemCard({ item, selected, onSelectedChange, onChanged }) {
           <button className="btn btn-secondary btn-sm" onClick={() => merge(item.suggested_part_id)}>Merge</button>
         </div>
       )}
-      {item.status === 'draft' && !item.product_image_url && (
-        <div className="suggestion-box">
-          <span>Missing image</span>
-          <button className="btn btn-secondary btn-sm" disabled={findingImage} onClick={findImage}>
-            {findingImage ? 'Searching...' : 'Internet Image Search'}
-          </button>
-          {imageMsg && <small className="muted">{imageMsg}</small>}
-          {imageErr && <small className="inline-error">{imageErr}</small>}
-        </div>
-      )}
-
       {item.status !== 'draft' ? (
         <p className="muted">Resolved as {item.resolved_part_name || item.status}.</p>
       ) : mode === 'review' ? (
