@@ -48,12 +48,12 @@ export default function Settings() {
       <div className="page-header">
         <div>
           <h1>Settings</h1>
-          <p className="page-subtitle">Project defaults, file tracking rules, backup, and restore.</p>
+          <p className="page-subtitle">Defaults and safeguards for documenting electronics projects.</p>
         </div>
       </div>
       <Section
         title="Project Template"
-        description="Control the default project step buttons, starter checklist items, and tracked file types used on project pages."
+        description="Set the default project step tags, starter checklist items, and tracked file types used for project workspaces."
       >
         <button className="btn btn-primary" onClick={() => setTemplateOpen(true)}>Project Template</button>
       </Section>
@@ -193,7 +193,7 @@ function BackupSection() {
   const doBackup = async () => {
     backup.start();
     try {
-      await triggerDownload(api.downloadBackup(), 'electronics-tracker-backup.json');
+      await triggerDownload(api.downloadBackup(), 'buildbook-web-backup.json');
       backup.done('Backup downloaded.');
     } catch (e) {
       backup.fail(e.message);
@@ -222,7 +222,7 @@ function BackupSection() {
   return (
     <Section
       title="Backup and Restore"
-      description="Backup includes projects, parts, import batches, links, notes, and file metadata. Uploaded files themselves stay on disk and should be preserved with the Docker volume."
+      description="Backup includes projects, reference parts, import batches, links, notes, checklist data, and file metadata. Uploaded files stay on disk and should be preserved with the Docker volume."
     >
       {backup.msg && <div className="alert alert-success">{backup.msg}</div>}
       {backup.err && <div className="alert alert-error">{backup.err}</div>}
@@ -245,11 +245,12 @@ function ReadmeSection() {
   return (
     <Section
       title="Quick Notes"
-      description="BuildBook_Web is for documenting electronics builds: projects hold notes, latest files, linked parts, datasheets, and checklist progress."
+      description="BuildBook_Web is for electronics project documentation. Projects are the workspace; parts are reusable reference records for datasheets, product info, storage location, and related documents."
     >
       <div className="settings-list">
-        <span>Use Project Template to tune default steps, checklist items, and tracked file types.</span>
-        <span>Use Backup before major cleanup or category/template changes.</span>
+        <span>Use Project Template to tune default workflow tags, checklist starters, and file tracking labels.</span>
+        <span>Use project exports when sharing a build package with notes, latest files, linked parts, and documents.</span>
+        <span>Use Backup before major cleanup, restore testing, or category/template changes.</span>
       </div>
     </Section>
   );

@@ -1,0 +1,4 @@
+services:
+  buildbook_web:
+    build: .
+    image: buildbook_web-local:latest

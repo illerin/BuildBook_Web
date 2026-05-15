@@ -1,6 +1,6 @@
 services:
   buildbook_web:
-    build: .
+    image: illerin/buildbook_web:latest
     ports:
       - "8079:8080"
     volumes:

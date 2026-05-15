@@ -31,7 +31,11 @@ export const api = {
   globalSearch: (query) => req('GET', `/search?q=${encodeURIComponent(query || '')}`),
 
   getParts: (params) => {
-    const query = new URLSearchParams(params || {}).toString();
+    const cleanParams = Object.entries(params || {}).reduce((acc, [key, value]) => {
+      if (value !== undefined && value !== null && value !== '') acc[key] = value;
+      return acc;
+    }, {});
+    const query = new URLSearchParams(cleanParams).toString();
     return req('GET', `/parts${query ? `?${query}` : ''}`);
   },
   createPart: (body) => req('POST', '/parts', body),

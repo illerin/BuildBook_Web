@@ -1,6 +1,6 @@
 {
   "name": "buildbook-web-frontend",
-  "version": "0.2.6",
+  "version": "0.2.12",
   "private": true,
   "dependencies": {
     "react": "^18.2.0",

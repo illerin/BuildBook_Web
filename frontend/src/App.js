@@ -8,7 +8,7 @@ import Search from './pages/Search';
 import Settings from './pages/Settings';
 import './App.css';
 
-const APP_VERSION = '0.2.6';
+const APP_VERSION = '0.2.12';
 
 export default function App() {
   return (

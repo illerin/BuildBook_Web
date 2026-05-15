@@ -78,6 +78,19 @@ function categoryPath(part) {
   return part.parent_category_name ? `${part.parent_category_name} / ${part.category_name}` : part.category_name;
 }
 
+function categoryOptionLabel(category, categories) {
+  const byId = new Map(categories.map((cat) => [String(cat.id), cat]));
+  const names = [];
+  let current = category;
+  const seen = new Set();
+  while (current && !seen.has(String(current.id))) {
+    seen.add(String(current.id));
+    names.unshift(current.name || 'Untitled');
+    current = current.parent_id ? byId.get(String(current.parent_id)) : null;
+  }
+  return names.join(' / ');
+}
+
 export default function ProjectDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -395,13 +408,6 @@ function LatestFiles({ files }) {
 
 function PartsTab({ project, onAdd, reload }) {
   const [selectedPart, setSelectedPart] = useState(null);
-  const viewableFiles = project.files.filter((file) => file.is_latest && isViewableFile(file));
-  const [selectedFileId, setSelectedFileId] = useState(viewableFiles[0]?.id || '');
-  const selectedFile = viewableFiles.find((file) => String(file.id) === String(selectedFileId)) || viewableFiles[0];
-
-  useEffect(() => {
-    if (!selectedFileId && viewableFiles[0]) setSelectedFileId(viewableFiles[0].id);
-  }, [selectedFileId, viewableFiles]);
 
   const remove = async (projectPartId) => {
     await api.removeProjectPart(projectPartId);
@@ -443,15 +449,14 @@ function PartsTab({ project, onAdd, reload }) {
           </div>
         )}
       </div>
-      <section className="card file-viewer-card">
-        {project.parts.length > 0 && (
+      <section className="card build-parts-card">
+        <h3>Build Parts</h3>
+        {project.parts.length > 0 ? (
           <div className="project-part-qty-list">
-            <h3>Build Parts</h3>
             {project.parts.map((part) => (
               <div key={part.project_part_id} className="project-part-qty-row">
                 <span>{part.name}</span>
                 <div className="qty-stepper">
-                  <button className="btn btn-secondary btn-sm" onClick={() => updateQuantity(part.project_part_id, Math.max(1, (part.quantity || 1) - 1))}>-</button>
                   <input
                     type="number"
                     min="1"
@@ -461,28 +466,11 @@ function PartsTab({ project, onAdd, reload }) {
                       if (e.key === 'Enter') e.currentTarget.blur();
                     }}
                   />
-                  <button className="btn btn-secondary btn-sm" onClick={() => updateQuantity(part.project_part_id, (part.quantity || 1) + 1)}>+</button>
                 </div>
               </div>
             ))}
           </div>
-        )}
-        <div className="card-title-row">
-          <h3>File Viewer</h3>
-          {selectedFile && <a className="btn btn-primary btn-sm viewer-open-btn" href={projectFileUrl(selectedFile.file_path)} target="_blank" rel="noreferrer">Open File</a>}
-        </div>
-        {viewableFiles.length > 0 ? (
-          <>
-            <select value={selectedFile?.id || ''} onChange={(e) => setSelectedFileId(e.target.value)}>
-              {viewableFiles.map((file) => (
-                <option key={file.id} value={file.id}>{file.file_category}: {file.original_filename}</option>
-              ))}
-            </select>
-            <FilePreview file={selectedFile} />
-          </>
-        ) : (
-          <p className="muted">Mark a project file as latest in the Files tab to preview it here.</p>
-        )}
+        ) : <p className="muted">Link parts to build a project-specific quantity list.</p>}
       </section>
       {selectedPart && <PartInfoModal partId={selectedPart.id} projectPartId={selectedPart.project_part_id} onClose={() => setSelectedPart(null)} onRemove={async () => { await remove(selectedPart.project_part_id); setSelectedPart(null); }} />}
     </div>
@@ -970,6 +958,7 @@ function PartInfoModal({ partId, onClose, onRemove }) {
   const [pdf, setPdf] = useState(null);
   const [selectedPdfId, setSelectedPdfId] = useState('');
   const [expandedPdf, setExpandedPdf] = useState(null);
+  const [expandedImage, setExpandedImage] = useState(false);
   const [err, setErr] = useState('');
 
   const load = useCallback(async () => setPart(await api.getPart(partId)), [partId]);
@@ -1007,7 +996,13 @@ function PartInfoModal({ partId, onClose, onRemove }) {
         {!part ? <div className="loading">Loading...</div> : (
           <>
             <div className="detail-header">
-              {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : <div className="detail-placeholder">Part</div>}
+              <div className="detail-image-slot">
+                {part.image_path ? (
+                  <button className="detail-image-button" onClick={() => setExpandedImage(true)} aria-label={`Expand image for ${part.name}`}>
+                    <img src={imageUrl(part.image_path)} alt="" />
+                  </button>
+                ) : <div className="detail-placeholder">Part</div>}
+              </div>
               <div>
                 <span>{categoryPath(part)}</span>
                 <h2>{part.name}</h2>
@@ -1087,6 +1082,17 @@ function PartInfoModal({ partId, onClose, onRemove }) {
                 </div>
               </ModalOverlay>
             )}
+            {expandedImage && part.image_path && (
+              <ModalOverlay className="image-expanded-overlay" onClose={() => setExpandedImage(false)}>
+                <div className="image-expanded-modal">
+                  <div className="viewer-toolbar">
+                    <strong>{part.name}</strong>
+                    <button className="btn btn-secondary btn-sm" onClick={() => setExpandedImage(false)}>Close</button>
+                  </div>
+                  <img src={imageUrl(part.image_path)} alt={part.name} />
+                </div>
+              </ModalOverlay>
+            )}
           </>
         )}
       </div>
@@ -1100,6 +1106,9 @@ function FilesTab({ project, reload, flash }) {
   const [editingTrackers, setEditingTrackers] = useState(false);
   const [files, setFiles] = useState([]);
   const [versionNote, setVersionNote] = useState('');
+  const viewableFiles = project.files.filter((file) => file.is_latest && isViewableFile(file));
+  const [selectedFileId, setSelectedFileId] = useState(viewableFiles[0]?.id || '');
+  const selectedFile = viewableFiles.find((file) => String(file.id) === String(selectedFileId)) || viewableFiles[0];
 
   useEffect(() => {
     api.getProjectTemplate().then((data) => {
@@ -1107,6 +1116,13 @@ function FilesTab({ project, reload, flash }) {
       setTrackerKey((current) => current || data.file_trackers[0]?.key || '');
     }).catch((e) => flash(e.message, true));
   }, []);
+
+  useEffect(() => {
+    if (!selectedFileId && viewableFiles[0]) setSelectedFileId(viewableFiles[0].id);
+    if (selectedFileId && !viewableFiles.some((file) => String(file.id) === String(selectedFileId))) {
+      setSelectedFileId(viewableFiles[0]?.id || '');
+    }
+  }, [selectedFileId, viewableFiles]);
 
   const trackers = template?.file_trackers || [];
   const selectedTracker = trackers.find((tracker) => tracker.key === trackerKey) || trackers[0];
@@ -1145,49 +1161,69 @@ function FilesTab({ project, reload, flash }) {
   };
 
   return (
-    <div>
-      <section className="card upload-card">
-        <select value={selectedTracker?.key || ''} onChange={(e) => setTrackerKey(e.target.value)}>
-          {trackers.map((tracker) => <option key={tracker.key} value={tracker.key}>{trackerLabel(tracker)}</option>)}
-        </select>
-        <input type="file" accept={accept} multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
-        <label className="btn btn-secondary">
-          Folder
-          <input
-            type="file"
-            webkitdirectory=""
-            directory=""
-            multiple
-            hidden
-            onChange={(e) => setFiles(Array.from(e.target.files || []))}
-          />
-        </label>
-        <input value={versionNote} onChange={(e) => setVersionNote(e.target.value)} placeholder="Version note, e.g. fixed pinout" />
-        <button className="btn btn-primary" disabled={!files.length} onClick={upload}>Upload{files.length > 1 ? ` ${files.length}` : ''}</button>
-        <button className="btn btn-secondary" onClick={() => setEditingTrackers(true)}>Edit File Types</button>
+    <div className="files-workspace">
+      <div>
+        <section className="card upload-card">
+          <select value={selectedTracker?.key || ''} onChange={(e) => setTrackerKey(e.target.value)}>
+            {trackers.map((tracker) => <option key={tracker.key} value={tracker.key}>{trackerLabel(tracker)}</option>)}
+          </select>
+          <input type="file" accept={accept} multiple onChange={(e) => setFiles(Array.from(e.target.files || []))} />
+          <label className="btn btn-secondary">
+            Folder
+            <input
+              type="file"
+              webkitdirectory=""
+              directory=""
+              multiple
+              hidden
+              onChange={(e) => setFiles(Array.from(e.target.files || []))}
+            />
+          </label>
+          <input value={versionNote} onChange={(e) => setVersionNote(e.target.value)} placeholder="Version note, e.g. fixed pinout" />
+          <button className="btn btn-primary" disabled={!files.length} onClick={upload}>Upload{files.length > 1 ? ` ${files.length}` : ''}</button>
+          <button className="btn btn-secondary" onClick={() => setEditingTrackers(true)}>Edit File Types</button>
+        </section>
+        {categories.map((cat) => {
+          const files = project.files.filter((item) => item.file_category === cat);
+          if (files.length === 0) return null;
+          return (
+            <section key={cat} className="card">
+              <h3>{cat}</h3>
+              {files.map((item) => (
+                <div key={item.id} className="file-row">
+                  <a href={projectFileUrl(item.file_path)} target="_blank" rel="noreferrer">{item.original_filename}</a>
+                  <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(item.id)}>Download</a>
+                  <span>{new Date(item.uploaded_at).toLocaleDateString()}</span>
+                  {item.version_note && <em className="file-note">{item.version_note}</em>}
+                  <button className={`btn btn-sm ${item.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(item)}>
+                    {item.is_latest ? 'Latest' : 'Mark Latest'}
+                  </button>
+                  <button className="btn-icon" onClick={() => remove(item)}>x</button>
+                </div>
+              ))}
+            </section>
+          );
+        })}
+        {project.files.length === 0 && <div className="empty">No files uploaded.</div>}
+      </div>
+      <section className="card file-viewer-card">
+        <div className="card-title-row">
+          <h3>File Viewer</h3>
+          {selectedFile && <a className="btn btn-primary btn-sm viewer-open-btn" href={projectFileUrl(selectedFile.file_path)} target="_blank" rel="noreferrer">Open File</a>}
+        </div>
+        {viewableFiles.length > 0 ? (
+          <>
+            <select value={selectedFile?.id || ''} onChange={(e) => setSelectedFileId(e.target.value)}>
+              {viewableFiles.map((file) => (
+                <option key={file.id} value={file.id}>{file.file_category}: {file.original_filename}</option>
+              ))}
+            </select>
+            <FilePreview file={selectedFile} />
+          </>
+        ) : (
+          <p className="muted">Mark a project file as latest to preview it here.</p>
+        )}
       </section>
-      {categories.map((cat) => {
-        const files = project.files.filter((item) => item.file_category === cat);
-        if (files.length === 0) return null;
-        return (
-          <section key={cat} className="card">
-            <h3>{cat}</h3>
-            {files.map((item) => (
-              <div key={item.id} className="file-row">
-                <a href={projectFileUrl(item.file_path)} target="_blank" rel="noreferrer">{item.original_filename}</a>
-                <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(item.id)}>Download</a>
-                <span>{new Date(item.uploaded_at).toLocaleDateString()}</span>
-                {item.version_note && <em className="file-note">{item.version_note}</em>}
-                <button className={`btn btn-sm ${item.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(item)}>
-                  {item.is_latest ? 'Latest' : 'Mark Latest'}
-                </button>
-                <button className="btn-icon" onClick={() => remove(item)}>x</button>
-              </div>
-            ))}
-          </section>
-        );
-      })}
-      {project.files.length === 0 && <div className="empty">No files uploaded.</div>}
       {editingTrackers && (
         <TrackerEditorModal
           template={template}
@@ -1290,13 +1326,25 @@ function AddPartModal({ project, onClose, onSave }) {
   const [categories, setCategories] = useState([]);
   const [parts, setParts] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  useEffect(() => { api.getCategories().then(setCategories); }, []);
+  useEffect(() => {
+    api.getCategories()
+      .then(setCategories)
+      .catch((e) => setError(e.message));
+  }, []);
   useEffect(() => {
     const timer = setTimeout(async () => {
       setLoading(true);
-      setParts(await api.getParts({ search, category: category || undefined }));
-      setLoading(false);
+      setError('');
+      try {
+        setParts(await api.getParts({ search, category }));
+      } catch (e) {
+        setError(e.message);
+        setParts([]);
+      } finally {
+        setLoading(false);
+      }
     }, 200);
     return () => clearTimeout(timer);
   }, [search, category]);
@@ -1320,9 +1368,10 @@ function AddPartModal({ project, onClose, onSave }) {
           <label>Category</label>
           <select value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">All categories</option>
-            {categories.map((cat) => <option key={cat.id} value={cat.id}>{cat.label}</option>)}
+            {categories.map((cat) => <option key={cat.id} value={cat.id}>{categoryOptionLabel(cat, categories)}</option>)}
           </select>
         </div>
+        {error && <div className="alert alert-error">{error}</div>}
         {loading ? <div className="loading">Loading...</div> : (
           <div className="pick-list">
             {parts.map((part) => (

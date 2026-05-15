@@ -650,19 +650,43 @@ function PartModal({ part, categories, onClose, onSave }) {
   });
   const [err, setErr] = useState('');
   const [imageFile, setImageFile] = useState(null);
+  const [documentFile, setDocumentFile] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.getProjects().then(setProjects).catch((e) => setErr(e.message));
+  }, []);
 
   const set = (key, value) => setForm((p) => ({ ...p, [key]: value }));
 
   const save = async () => {
     if (!form.name.trim()) return setErr('Name is required');
-    const body = { ...form, category_id: form.category_id || null };
-    const saved = part ? await api.updatePart(part.id, body) : await api.createPart(body);
-    if (imageFile) {
-      const upload = new FormData();
-      upload.append('image', imageFile);
-      await api.uploadPartImage(saved.id, upload);
+    setSaving(true);
+    setErr('');
+    try {
+      const body = { ...form, category_id: form.category_id || null };
+      const saved = part ? await api.updatePart(part.id, body) : await api.createPart(body);
+      if (imageFile) {
+        const upload = new FormData();
+        upload.append('image', imageFile);
+        await api.uploadPartImage(saved.id, upload);
+      }
+      if (documentFile) {
+        const upload = new FormData();
+        upload.append('file', documentFile);
+        await api.uploadPartDocument(saved.id, upload);
+      }
+      if (projectId) {
+        await api.addProjectPart(projectId, { part_id: saved.id });
+      }
+      onSave();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
     }
-    onSave();
   };
   // TODO(post-MVP): reintroduce automatic spec/image lookup after quality improves.
 
@@ -700,6 +724,21 @@ function PartModal({ part, categories, onClose, onSave }) {
           <label>Image</label>
           <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
         </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label>Document</label>
+            <input type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
+          </div>
+          <div className="form-group">
+            <label>Add to project</label>
+            <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              <option value="">Do not link yet</option>
+              {projects
+                .filter((project) => !part?.projects?.some((linked) => linked.id === project.id))
+                .map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          </div>
+        </div>
         <div className="form-group">
           <label>Spec summary</label>
           <textarea value={form.spec_summary} onChange={(e) => set('spec_summary', e.target.value)} rows={7} />
@@ -710,7 +749,7 @@ function PartModal({ part, categories, onClose, onSave }) {
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={save}>Save</button>
+          <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Save'}</button>
         </div>
       </div>
     </ModalOverlay>
@@ -723,6 +762,7 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   const [projectId, setProjectId] = useState('');
   const [selectedPdfId, setSelectedPdfId] = useState('');
   const [expandedPdf, setExpandedPdf] = useState(null);
+  const [expandedImage, setExpandedImage] = useState(false);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [editingName, setEditingName] = useState(false);
@@ -848,7 +888,11 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
       <div className="modal detail-modal">
         <div className="detail-header">
           <div className="detail-image-slot">
-            {part.image_path ? <img src={imageUrl(part.image_path)} alt="" /> : (
+            {part.image_path ? (
+              <button className="detail-image-button" onClick={() => setExpandedImage(true)} aria-label={`Expand image for ${part.name}`}>
+                <img src={imageUrl(part.image_path)} alt="" />
+              </button>
+            ) : (
               <div className="detail-placeholder">
                 <span>Part</span>
               </div>
@@ -985,6 +1029,17 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
                 <button className="btn btn-secondary btn-sm" onClick={() => setExpandedPdf(null)}>Close</button>
               </div>
               <iframe title={expandedPdf.original_filename} src={docUrl(expandedPdf.file_path)} />
+            </div>
+          </ModalOverlay>
+        )}
+        {expandedImage && part.image_path && (
+          <ModalOverlay className="image-expanded-overlay" onClose={() => setExpandedImage(false)}>
+            <div className="image-expanded-modal">
+              <div className="viewer-toolbar">
+                <strong>{part.name}</strong>
+                <button className="btn btn-secondary btn-sm" onClick={() => setExpandedImage(false)}>Close</button>
+              </div>
+              <img src={imageUrl(part.image_path)} alt={part.name} />
             </div>
           </ModalOverlay>
         )}
