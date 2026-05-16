@@ -17,6 +17,7 @@ WORKDIR /app
 COPY backend/package.json ./
 RUN npm install --production
 COPY backend/server.js ./
+COPY backend/importExportSchema.js ./
 
 # DB init
 COPY init-db/schema.sql /docker-entrypoint-initdb.d/schema.sql

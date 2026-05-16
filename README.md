@@ -164,3 +164,5 @@ Docker Compose mounts:
 Keep both volumes if you want to preserve the app state.
 
 The in-app backup feature is the portable option. It downloads a zip containing the database backup plus uploaded images, documents, project files, and import files.
+
+The import/export compatibility contract with BuildBook desktop is documented in [docs/import-export-format.md](docs/import-export-format.md).

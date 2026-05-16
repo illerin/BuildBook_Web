@@ -10,11 +10,12 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { BACKUP_TABLES, validateBackupData, validateProjectExportManifest } from './importExportSchema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.14';
+const APP_VERSION = '0.2.16';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -1484,11 +1485,9 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
 async function loadProjectManifest(zipPath) {
   const directory = await unzipper.Open.file(zipPath);
   const entry = directory.files.find((file) => file.path === 'project-manifest.json');
-  if (!entry) throw new Error('This zip does not include a project manifest. Export it again with BuildBook_Web 0.2.1 or newer.');
+  if (!entry) throw new Error('This zip does not include project-manifest.json.');
   const manifest = JSON.parse((await entry.buffer()).toString('utf-8'));
-  if (manifest.type !== 'buildbook-web-project-export') {
-    throw new Error('This is not a BuildBook_Web project export.');
-  }
+  validateProjectExportManifest(manifest);
   return { manifest, directory };
 }
 
@@ -2233,20 +2232,6 @@ app.delete('/api/imports/:id', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-const BACKUP_TABLES = [
-  'app_metadata',
-  'category',
-  'part',
-  'part_document',
-  'project',
-  'project_part',
-  'project_file',
-  'project_checklist_item',
-  'step_definition',
-  'project_step',
-  'import_batch',
-  'import_item',
-];
 const BACKUP_WIPE_ORDER = [
   'import_item',
   'import_batch',
@@ -2317,9 +2302,7 @@ function emptyUploadDir(dir) {
 }
 
 async function restoreBackupData(client, data) {
-  if (data.type !== 'buildbook-web-backup' || ![2, 3].includes(data.version)) {
-    throw new Error('Not a BuildBook_Web backup file');
-  }
+  validateBackupData(data);
   for (const table of BACKUP_WIPE_ORDER) await client.query(`DELETE FROM ${table}`);
   await client.query(`DELETE FROM app_metadata WHERE key <> 'schema_version'`);
 

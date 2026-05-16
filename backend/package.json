@@ -1,10 +1,13 @@
 {
   "name": "buildbook-web-backend",
-  "version": "0.2.14",
+  "version": "0.2.16",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node test/runCompatTests.js",
+    "test:compat": "node test/runCompatTests.js",
+    "validate:fixtures": "node test/fixtures/import-export/buildFixtures.js --validate"
   },
   "dependencies": {
     "express": "^4.18.2",
