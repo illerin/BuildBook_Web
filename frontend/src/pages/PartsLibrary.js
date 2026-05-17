@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import * as XLSX from 'xlsx';
 import { API_BASE, api } from '../api/client';
 import ModalOverlay from '../components/ModalOverlay';
 
@@ -10,6 +11,19 @@ function imageUrl(path) {
 function docUrl(path) {
   return `${API_BASE}/files/documents/${path}`;
 }
+
+function fileExtension(name) {
+  const match = String(name || '').toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : '';
+}
+
+const IMAGE_PREVIEW_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
+const SPREADSHEET_PREVIEW_EXTS = ['.xlsx', '.xls', '.csv', '.tsv'];
+const TEXT_PREVIEW_EXTS = [
+  '.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx',
+  '.ino', '.c', '.cpp', '.h', '.hpp', '.py', '.yaml', '.yml', '.gcode', '.nc',
+  '.kicad_pcb', '.kicad_sch', '.sch', '.brd',
+];
 
 function categoryPath(part) {
   if (!part.category_name) return 'Uncategorized';
@@ -689,6 +703,15 @@ function PartModal({ part, categories, onClose, onSave }) {
     }
   };
   // TODO(post-MVP): reintroduce automatic spec/image lookup after quality improves.
+  const openImageSearch = () => {
+    const query = form.name.trim() || part?.name?.trim();
+    if (!query) {
+      setErr('Enter a part name before searching for images.');
+      return;
+    }
+    const searchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${query} part image`)}`;
+    window.open(searchUrl, '_blank', 'noopener,noreferrer');
+  };
 
   return (
     <ModalOverlay onClose={onClose}>
@@ -722,7 +745,10 @@ function PartModal({ part, categories, onClose, onSave }) {
         </div>
         <div className="form-group">
           <label>Image</label>
-          <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+          <div className="image-picker-row">
+            <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+            <button type="button" className="btn btn-secondary" onClick={openImageSearch}>Search Images</button>
+          </div>
         </div>
         <div className="form-row">
           <div className="form-group">
@@ -760,8 +786,8 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   const [part, setPart] = useState(null);
   const [projects, setProjects] = useState([]);
   const [projectId, setProjectId] = useState('');
-  const [selectedPdfId, setSelectedPdfId] = useState('');
-  const [expandedPdf, setExpandedPdf] = useState(null);
+  const [selectedDocId, setSelectedDocId] = useState('');
+  const [expandedDoc, setExpandedDoc] = useState(null);
   const [expandedImage, setExpandedImage] = useState(false);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -787,12 +813,10 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     );
   }
 
-  const pdfDocs = (part.documents || []).filter((doc) => (
-    doc.file_type === 'pdf' || doc.original_filename?.toLowerCase().endsWith('.pdf')
-  ));
-  const selectedPdf = pdfDocs.find((doc) => String(doc.id) === String(selectedPdfId))
-    || pdfDocs.find((doc) => doc.is_primary)
-    || pdfDocs[0];
+  const docs = part.documents || [];
+  const selectedDoc = docs.find((doc) => String(doc.id) === String(selectedDocId))
+    || docs.find((doc) => doc.is_primary)
+    || docs[0];
 
   const startNameEdit = () => {
     setNameDraft(part.name || '');
@@ -952,15 +976,11 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
             <section className="card">
               <h3>Documents</h3>
               {part.documents?.length ? part.documents.map((doc) => (
-                <div key={doc.id} className={`file-row ${selectedPdf?.id === doc.id ? 'selected-file-row' : ''}`}>
+                <div key={doc.id} className={`file-row ${selectedDoc?.id === doc.id ? 'selected-file-row' : ''}`}>
                   <a href={doc.file_path ? docUrl(doc.file_path) : undefined} target="_blank" rel="noreferrer">{doc.original_filename}</a>
-                  <span>{doc.is_primary ? 'Primary' : new Date(doc.uploaded_at).toLocaleDateString()}</span>
-                  {(doc.file_type === 'pdf' || doc.original_filename?.toLowerCase().endsWith('.pdf')) && (
-                    <button className="btn btn-secondary btn-sm" onClick={() => setSelectedPdfId(doc.id)}>Preview</button>
-                  )}
-                  {(doc.file_type === 'pdf' || doc.original_filename?.toLowerCase().endsWith('.pdf')) && !doc.is_primary && (
-                    <button className="btn btn-secondary btn-sm" onClick={() => setPrimaryDoc(doc.id)}>Make Primary</button>
-                  )}
+                  <span>{doc.is_primary ? 'Default' : new Date(doc.uploaded_at).toLocaleDateString()}</span>
+                  <button className="btn btn-secondary btn-sm" onClick={() => setSelectedDocId(doc.id)}>Preview</button>
+                  {!doc.is_primary && <button className="btn btn-secondary btn-sm" onClick={() => setPrimaryDoc(doc.id)}>Make Default</button>}
                   <button className="btn-icon" onClick={() => removeDoc(doc.id)}>x</button>
                 </div>
               )) : <p className="muted">No documents attached.</p>}
@@ -973,25 +993,25 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
             </section>
           </div>
 
-          <section className="card part-pdf-card">
+          <section className="card part-preview-card">
             <div className="card-title-row">
-              <h3>PDF Preview</h3>
-              {selectedPdf && <a className="sub-link" href={docUrl(selectedPdf.file_path)} target="_blank" rel="noreferrer">Open</a>}
+              <h3>File Preview</h3>
+              {selectedDoc?.file_path && <a className="sub-link" href={docUrl(selectedDoc.file_path)} target="_blank" rel="noreferrer">Open</a>}
             </div>
-            {selectedPdf ? (
+            {selectedDoc ? (
               <>
-                {pdfDocs.length > 1 && (
-                  <select value={selectedPdf.id} onChange={(e) => setSelectedPdfId(e.target.value)}>
-                    {pdfDocs.map((doc) => <option key={doc.id} value={doc.id}>{doc.original_filename}</option>)}
+                {docs.length > 1 && (
+                  <select value={selectedDoc.id} onChange={(e) => setSelectedDocId(e.target.value)}>
+                    {docs.map((doc) => <option key={doc.id} value={doc.id}>{doc.original_filename}</option>)}
                   </select>
                 )}
-                <button className="pdf-preview-button" onClick={() => setExpandedPdf(selectedPdf)}>
-                  <iframe title={selectedPdf.original_filename} src={docUrl(selectedPdf.file_path)} />
+                <button className="file-document-preview-button" onClick={() => setExpandedDoc(selectedDoc)}>
+                  <PartDocumentPreview doc={selectedDoc} compact />
                   <span>Click to expand</span>
                 </button>
               </>
             ) : (
-              <p className="muted">Attach a PDF datasheet or document to preview it here.</p>
+              <p className="muted">Attach a supported file to preview it here.</p>
             )}
           </section>
         </div>
@@ -1020,15 +1040,15 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
             ))}
           </section>
         )}
-        {expandedPdf && (
-          <ModalOverlay className="pdf-expanded-overlay" onClose={() => setExpandedPdf(null)}>
+        {expandedDoc && (
+          <ModalOverlay className="pdf-expanded-overlay" onClose={() => setExpandedDoc(null)}>
             <div className="pdf-expanded-modal">
               <div className="viewer-toolbar">
-                <strong>{expandedPdf.original_filename}</strong>
-                <a className="btn btn-secondary btn-sm" href={docUrl(expandedPdf.file_path)} target="_blank" rel="noreferrer">Open</a>
-                <button className="btn btn-secondary btn-sm" onClick={() => setExpandedPdf(null)}>Close</button>
+                <strong>{expandedDoc.original_filename}</strong>
+                {expandedDoc.file_path && <a className="btn btn-secondary btn-sm" href={docUrl(expandedDoc.file_path)} target="_blank" rel="noreferrer">Open</a>}
+                <button className="btn btn-secondary btn-sm" onClick={() => setExpandedDoc(null)}>Close</button>
               </div>
-              <iframe title={expandedPdf.original_filename} src={docUrl(expandedPdf.file_path)} />
+              <PartDocumentPreview doc={expandedDoc} />
             </div>
           </ModalOverlay>
         )}
@@ -1045,5 +1065,113 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
         )}
       </div>
     </ModalOverlay>
+  );
+}
+
+function PartDocumentPreview({ doc, compact = false }) {
+  if (!doc) return null;
+  const ext = fileExtension(doc.original_filename);
+  const url = doc.file_path ? docUrl(doc.file_path) : '';
+  if (doc.file_type === 'pdf' || ext === '.pdf') {
+    return <iframe className="file-preview-frame" title={doc.original_filename} src={url} />;
+  }
+  if (doc.file_type === 'image' || IMAGE_PREVIEW_EXTS.includes(ext)) {
+    return <img className="file-preview-image" src={url} alt={doc.original_filename} />;
+  }
+  if (SPREADSHEET_PREVIEW_EXTS.includes(ext)) {
+    return <PartSpreadsheetPreview url={url} filename={doc.original_filename} ext={ext} />;
+  }
+  if (doc.text_content && !doc.file_path) {
+    return <pre className="file-preview-text">{doc.text_content}</pre>;
+  }
+  if (TEXT_PREVIEW_EXTS.includes(ext)) {
+    return <PartTextPreview url={url} filename={doc.original_filename} />;
+  }
+  return (
+    <div className="file-preview-empty">
+      <strong>{doc.original_filename}</strong>
+      <p className="muted">No built-in preview for this file type yet. It can still be opened from here.</p>
+      {url && <a className="btn btn-secondary btn-sm" href={url} target="_blank" rel="noreferrer">Open File</a>}
+    </div>
+  );
+}
+
+function PartTextPreview({ url, filename }) {
+  const [text, setText] = useState('');
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) throw new Error('Could not load file');
+        return response.text();
+      })
+      .then((value) => alive && setText(value.slice(0, 120000)))
+      .catch((e) => alive && setErr(e.message));
+    return () => { alive = false; };
+  }, [url]);
+
+  if (err) return <div className="file-preview-empty"><strong>{filename}</strong><p className="muted">{err}</p></div>;
+  return <pre className="file-preview-text">{text || 'Loading...'}</pre>;
+}
+
+function PartSpreadsheetPreview({ url, filename, ext }) {
+  const [sheets, setSheets] = useState([]);
+  const [activeSheet, setActiveSheet] = useState('');
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState('');
+
+  const loadSheet = useCallback((sheetName = '') => {
+    fetch(url)
+      .then((response) => {
+        if (!response.ok) throw new Error('Could not load spreadsheet');
+        return ext === '.csv' || ext === '.tsv' ? response.text() : response.arrayBuffer();
+      })
+      .then((data) => {
+        const workbook = ext === '.csv' || ext === '.tsv'
+          ? XLSX.read(data, { type: 'string', raw: false, FS: ext === '.tsv' ? '\t' : ',' })
+          : XLSX.read(data, { type: 'array' });
+        const names = workbook.SheetNames || [];
+        const nextSheet = sheetName || names[0] || '';
+        setSheets(names);
+        setActiveSheet(nextSheet);
+        setRows(nextSheet ? XLSX.utils.sheet_to_json(workbook.Sheets[nextSheet], { header: 1, defval: '' }).slice(0, 250) : []);
+      })
+      .catch((e) => setErr(e.message));
+  }, [url, ext]);
+
+  useEffect(() => { loadSheet(); }, [loadSheet]);
+
+  if (err) return <div className="file-preview-empty"><strong>{filename}</strong><p className="muted">{err}</p></div>;
+  const columnCount = Math.max(...rows.map((row) => row.length), 0);
+  return (
+    <div className="spreadsheet-preview">
+      <div className="viewer-toolbar">
+        <strong>{filename}</strong>
+        {sheets.length > 1 && (
+          <select value={activeSheet} onChange={(e) => loadSheet(e.target.value)}>
+            {sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
+          </select>
+        )}
+        <span>{rows.length ? `${rows.length} rows shown` : 'Loading...'}</span>
+      </div>
+      <div className="spreadsheet-table-wrap">
+        <table className="spreadsheet-table">
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td>Loading...</td></tr>
+            ) : rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>
+                {Array.from({ length: columnCount }).map((_, colIndex) => {
+                  const Tag = rowIndex === 0 ? 'th' : 'td';
+                  return <Tag key={colIndex}>{String(row[colIndex] ?? '')}</Tag>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

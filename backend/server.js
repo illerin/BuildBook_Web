@@ -15,7 +15,7 @@ import { BACKUP_TABLES, validateBackupData, validateProjectExportManifest } from
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.16';
+const APP_VERSION = '0.2.19';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -1001,7 +1001,7 @@ app.get('/api/parts/:id', asyncHandler(async (req, res) => {
        GROUP BY p.id, c.id, parent.id`,
       [req.params.id],
     ),
-    pool.query(`SELECT * FROM part_document WHERE part_id=$1 ORDER BY uploaded_at DESC`, [req.params.id]),
+    pool.query(`SELECT * FROM part_document WHERE part_id=$1 ORDER BY is_primary DESC, uploaded_at DESC`, [req.params.id]),
     pool.query(
       `SELECT pp.id AS project_part_id, pr.id, pr.name, pr.status
        FROM project_part pp
@@ -1096,7 +1096,7 @@ app.post('/api/parts/:id/documents', uploadDoc.single('file'), asyncHandler(asyn
       req.file?.filename || null,
       text_content || null,
       req.file?.originalname || original_filename || 'text-entry',
-      fileType === 'pdf' && !existingPrimary[0],
+      !existingPrimary[0],
     ],
   );
   await pool.query(`UPDATE part SET updated_at=NOW() WHERE id=$1`, [req.params.id]);
@@ -2228,8 +2228,26 @@ app.post('/api/import-items/:id/skip', asyncHandler(async (req, res) => {
 }));
 
 app.delete('/api/imports/:id', asyncHandler(async (req, res) => {
-  await pool.query(`DELETE FROM import_batch WHERE id=$1`, [req.params.id]);
-  res.json({ ok: true });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: [{ count }] } = await client.query(
+      `SELECT COUNT(*)::int AS count FROM import_item WHERE import_batch_id=$1`,
+      [req.params.id],
+    );
+    const result = await client.query(`DELETE FROM import_batch WHERE id=$1`, [req.params.id]);
+    if (!result.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Import batch not found' });
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, deleted_items: count });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }));
 
 const BACKUP_WIPE_ORDER = [

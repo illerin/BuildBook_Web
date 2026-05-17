@@ -126,6 +126,24 @@ export default function Imports() {
     }
   };
 
+  const deleteBatch = async (batch) => {
+    const label = batch.original_filename || `Import ${batch.id}`;
+    if (!window.confirm(`Delete import batch "${label}"?\n\nImported parts already in the Parts Library will stay.`)) return;
+    setErr('');
+    setMsg('');
+    try {
+      await api.deleteImport(batch.id);
+      if (String(selectedId) === String(batch.id)) {
+        setSelectedId(null);
+        setSelected(null);
+      }
+      await load();
+      setMsg('Import batch deleted. Imported parts were kept.');
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -181,7 +199,7 @@ export default function Imports() {
         <section>
           {!selectedId ? <div className="empty">Select an import batch.</div> :
             !selected ? <div className="loading">Loading...</div> :
-              <BatchReview batch={selected} onChanged={refreshAll} />
+              <BatchReview batch={selected} onChanged={refreshAll} onDeleteBatch={deleteBatch} />
           }
         </section>
       </div>
@@ -189,7 +207,7 @@ export default function Imports() {
   );
 }
 
-function BatchReview({ batch, onChanged }) {
+function BatchReview({ batch, onChanged, onDeleteBatch }) {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [categories, setCategories] = useState([]);
   const [bulkCategoryId, setBulkCategoryId] = useState('');
@@ -283,6 +301,7 @@ function BatchReview({ batch, onChanged }) {
         <div className="status-counts">
           <span>{groups.draft.length} draft</span>
           <span>{groups.done.length} resolved</span>
+          <button className="btn btn-danger btn-sm" onClick={() => onDeleteBatch(batch)}>Delete Batch</button>
         </div>
       </div>
 
