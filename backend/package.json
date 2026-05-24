@@ -1,6 +1,6 @@
 {
   "name": "buildbook-web-backend",
-  "version": "0.2.19",
+  "version": "0.2.45",
   "type": "module",
   "scripts": {
     "start": "node server.js",

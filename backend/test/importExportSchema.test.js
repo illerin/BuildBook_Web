@@ -17,7 +17,10 @@ test('valid web project export passes schema validation', () => {
 });
 
 test('desktop-compatible project export passes schema validation', () => {
-  assert.equal(validateProjectExportManifest(projectExportFixture('desktop')).project.name, 'desktop Compatibility Project');
+  const manifest = validateProjectExportManifest(projectExportFixture('desktop'));
+  assert.equal(manifest.project.name, 'desktop Compatibility Project');
+  assert.equal(manifest.photo_library[0].photos[0].id, 'bench-1');
+  assert.equal(manifest.instructions.steps[0].photo_id, 'bench-1');
 });
 
 test('wrong project export type fails clearly', () => {
@@ -79,9 +82,13 @@ test('fixture builders generate project export and full backup zips', async () =
   const projectEntries = (await unzipper.Open.file(projectZip)).files.map((file) => file.path);
   const backupEntries = (await unzipper.Open.file(backupZip)).files.map((file) => file.path);
   assert.ok(projectEntries.includes('project-manifest.json'));
+  assert.ok(projectEntries.includes('buildbook-package.json'));
   assert.ok(projectEntries.includes('latest-files/fixture-firmware.ino'));
   assert.ok(projectEntries.includes('part-documents/controller.pdf'));
+  assert.ok(projectEntries.includes('project-photos/bench-photos/bench-1-original-bench-main.png'));
   assert.ok(backupEntries.includes('backup.json'));
+  assert.ok(backupEntries.includes('buildbook-backup.json'));
   assert.ok(backupEntries.includes('uploads/images/web-project.png'));
   assert.ok(backupEntries.includes('uploads/projects/web-firmware.ino'));
+  assert.ok(backupEntries.includes('projects/1/image/Fixture Project.png'));
 });

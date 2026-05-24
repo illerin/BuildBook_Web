@@ -19,6 +19,14 @@ const STATUS_BADGE = {
   archived: 'badge-purple',
 };
 
+const STATUS_ORDER = {
+  active: 0,
+  waiting: 1,
+  paused: 2,
+  completed: 3,
+  archived: 4,
+};
+
 function categoryDepth(label) {
   return String(label || '').split('/').filter(Boolean).length - 1;
 }
@@ -32,9 +40,9 @@ function categoryOptionText(category) {
   return `${'  '.repeat(depth)}${depth > 0 ? '- ' : ''}${category.name}`;
 }
 
-export default function Projects() {
+export default function Projects({ initialFilter = 'open' }) {
   const [projects, setProjects] = useState([]);
-  const [filter, setFilter] = useState('open');
+  const [filter, setFilter] = useState(initialFilter);
   const [loading, setLoading] = useState(true);
   const [showNew, setShowNew] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -47,11 +55,28 @@ export default function Projects() {
 
   useEffect(() => { load(); }, []);
 
-  const visible = projects.filter((project) => {
-    if (filter === 'all') return true;
-    if (filter === 'open') return project.status !== 'archived';
-    return project.status === filter;
-  });
+  useEffect(() => { setFilter(initialFilter); }, [initialFilter]);
+
+  const isCompletedView = initialFilter === 'completed';
+  const filterKeys = isCompletedView
+    ? ['completed', 'archived']
+    : ['open', 'all', 'active', 'waiting', 'paused', 'archived'];
+
+  const visible = projects
+    .filter((project) => {
+      if (isCompletedView) {
+        if (filter === 'archived') return project.status === 'archived';
+        return project.status === 'completed';
+      }
+      if (project.status === 'completed') return false;
+      if (filter === 'all') return true;
+      if (filter === 'open') return project.status !== 'archived';
+      return project.status === filter;
+    })
+    .sort((a, b) => (
+      (STATUS_ORDER[a.status] ?? 99) - (STATUS_ORDER[b.status] ?? 99)
+      || a.name.localeCompare(b.name)
+    ));
 
   return (
     <div>
@@ -67,7 +92,7 @@ export default function Projects() {
       </div>
 
       <div className="filters">
-        {['open', 'all', 'active', 'waiting', 'paused', 'completed', 'archived'].map((key) => (
+        {filterKeys.map((key) => (
           <button
             key={key}
             className={`btn btn-sm ${filter === key ? 'btn-primary' : 'btn-secondary'}`}
@@ -101,7 +126,7 @@ function ProjectCard({ project }) {
   return (
     <Link to={`/projects/${project.id}`} className="project-card">
       <div className="project-card-image">
-        {project.image_path ? <img src={`${API_BASE}/files/images/${project.image_path}`} alt="" /> : <div>Project</div>}
+        {project.image_path ? <img src={`${API_BASE}/files/images/${encodeURIComponent(project.image_path)}`} alt="" /> : <div>Project</div>}
         <span className={`badge ${STATUS_BADGE[project.status]}`}>{STATUS_LABEL[project.status]}</span>
       </div>
       <div className="project-card-body">

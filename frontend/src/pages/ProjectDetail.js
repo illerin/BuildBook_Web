@@ -21,7 +21,7 @@ const STATUS_BADGE = {
 };
 
 function imageUrl(path) {
-  return path ? `${API_BASE}/files/images/${path}` : '';
+  return path ? `${API_BASE}/files/images/${encodeURIComponent(path)}` : '';
 }
 
 function projectFileUrl(path) {
@@ -78,6 +78,178 @@ function categoryPath(part) {
   return part.parent_category_name ? `${part.parent_category_name} / ${part.category_name}` : part.category_name;
 }
 
+function flattenProjectPhotos(photoLibrary = []) {
+  return photoLibrary.flatMap((folder) => (folder.photos || []).map((photo) => ({
+    ...photo,
+    folder_id: folder.id,
+    folder_name: folder.name,
+  })));
+}
+
+function emptyPortableData(portable = {}) {
+  return {
+    photo_library: Array.isArray(portable?.photo_library) ? portable.photo_library : [],
+    instructions: portable?.instructions && typeof portable.instructions === 'object'
+      ? {
+        intro: portable.instructions.intro || '',
+        steps: Array.isArray(portable.instructions.steps) ? portable.instructions.steps : [],
+      }
+      : { intro: '', steps: [] },
+    desktop_export_options: portable?.desktop_export_options && typeof portable.desktop_export_options === 'object'
+      ? portable.desktop_export_options
+      : {},
+    manifest_extensions: portable?.manifest_extensions && typeof portable.manifest_extensions === 'object'
+      ? portable.manifest_extensions
+      : {},
+  };
+}
+
+function makeLocalId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildInstructionsPrintHtml(project) {
+  const portable = emptyPortableData(project.portable_data);
+  const photoMap = new Map(flattenProjectPhotos(portable.photo_library).map((photo) => [String(photo.id), photo]));
+  const partRows = (project.parts || []).map((part) => (
+    `<li>${escapeHtml(part.name)} <span style="color:#6b7280">Qty ${Number(part.quantity) || 1}</span></li>`
+  )).join('');
+  const stepRows = (portable.instructions.steps || [])
+    .slice()
+    .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+    .map((step, index) => {
+      const photo = step.photo_id ? photoMap.get(String(step.photo_id)) : null;
+      const photoSrc = photo ? imageUrl(photo.markup_image_path || photo.original_image_path) : '';
+      return `
+        <section>
+          <h2>Step ${index + 1}: ${escapeHtml(step.title || `Step ${index + 1}`)}</h2>
+          ${photoSrc ? `<img src="${photoSrc}" alt="${escapeHtml(photo.name || step.title || `Step ${index + 1}`)}" />` : ''}
+          <div>${step.body || '<p>No details yet.</p>'}</div>
+        </section>
+      `;
+    }).join('');
+  return `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(project.name)} Instructions</title>
+    <style>
+      body{margin:0;background:#f5f5f5;color:#111827;font:16px/1.55 Segoe UI,Arial,sans-serif}
+      main{max-width:960px;margin:0 auto;padding:28px 20px}
+      section{background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:18px;margin:16px 0;break-inside:avoid}
+      img{display:block;max-width:100%;max-height:720px;object-fit:contain;border:1px solid #d1d5db;border-radius:8px;margin:14px 0}
+      .muted{color:#6b7280}
+      @media print{body{background:#fff}main{padding:0}section{border-color:#ddd}}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(project.name)}</h1>
+      <section><h2>Intro</h2><div>${portable.instructions.intro || '<p>No intro yet.</p>'}</div></section>
+      <section><h2>Parts List</h2><ul>${partRows || '<li>No linked parts.</li>'}</ul></section>
+      ${stepRows || '<section><p class="muted">No instruction steps yet.</p></section>'}
+    </main>
+  </body>
+  </html>`;
+}
+
+function parsePortableFileData(value) {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return {}; }
+  }
+  return typeof value === 'object' ? value : {};
+}
+
+function groupProjectFilesForDisplay(files = [], trackers = []) {
+  const trackerByKey = new Map((trackers || []).map((tracker) => [String(tracker.key), tracker]));
+  const byTracker = new Map();
+  const sortRows = (rows) => [...rows].sort((a, b) => (
+    (Date.parse(b.uploaded_at || '') || 0) - (Date.parse(a.uploaded_at || '') || 0)
+      || Number(b.id) - Number(a.id)
+  ));
+
+  for (const file of sortRows(files)) {
+    const trackerKey = file.tracker_key || '';
+    const tracker = trackerByKey.get(String(trackerKey));
+    const trackerLabel = tracker?.label || file.file_category || 'Other';
+    const trackerColor = tracker?.color || '#58a6ff';
+    const portable = parsePortableFileData(file.portable_data);
+    const folderPath = portable.folder_path || '';
+    const trackerBucket = byTracker.get(trackerLabel) || {
+      key: trackerKey || trackerLabel,
+      label: trackerLabel,
+      color: trackerColor,
+      groups: new Map(),
+    };
+    const groupKey = folderPath ? `folder:${trackerKey}:${folderPath}` : `file:${trackerKey}:${file.original_filename}`;
+    if (!trackerBucket.groups.has(groupKey)) {
+      trackerBucket.groups.set(groupKey, {
+        key: groupKey,
+        kind: folderPath ? 'folder' : 'file',
+        label: folderPath ? folderPath : file.original_filename,
+        folderPath,
+        revisions: [],
+      });
+    }
+    const group = trackerBucket.groups.get(groupKey);
+    if (folderPath) {
+      const revisionKey = `${folderPath}|${file.version_note || ''}|${file.uploaded_at || ''}|${file.is_latest ? '1' : '0'}`;
+      let revision = group.revisions.find((item) => item.key === revisionKey);
+      if (!revision) {
+        revision = {
+          key: revisionKey,
+          kind: 'folder',
+          label: folderPath.split('/').pop() || folderPath,
+          folderPath,
+          version_note: file.version_note || '',
+          uploaded_at: file.uploaded_at,
+          is_latest: Boolean(file.is_latest),
+          files: [],
+        };
+        group.revisions.push(revision);
+      }
+      revision.files.push(file);
+    } else {
+      group.revisions.push({
+        key: `file:${file.id}`,
+        kind: 'file',
+        label: file.original_filename,
+        version_note: file.version_note || '',
+        uploaded_at: file.uploaded_at,
+        is_latest: Boolean(file.is_latest),
+        file,
+      });
+    }
+    byTracker.set(trackerLabel, trackerBucket);
+  }
+
+  return [...byTracker.values()]
+    .map((trackerGroup) => ({
+      ...trackerGroup,
+      groups: [...trackerGroup.groups.values()]
+        .map((group) => ({
+          ...group,
+          revisions: sortRows(group.revisions.map((revision) => (
+            revision.kind === 'folder'
+              ? { ...revision, files: sortRows(revision.files) }
+              : revision
+          ))),
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 function categoryOptionLabel(category, categories) {
   const byId = new Map(categories.map((cat) => [String(cat.id), cat]));
   const names = [];
@@ -89,6 +261,36 @@ function categoryOptionLabel(category, categories) {
     current = current.parent_id ? byId.get(String(current.parent_id)) : null;
   }
   return names.join(' / ');
+}
+
+function orderedCategoryOptions(categories) {
+  const byParent = new Map();
+  categories.forEach((category) => {
+    const key = category.parent_id ? String(category.parent_id) : '__root__';
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(category);
+  });
+  for (const items of byParent.values()) {
+    items.sort((a, b) => (
+      (a.order_index ?? 0) - (b.order_index ?? 0)
+      || String(a.name || '').localeCompare(String(b.name || ''))
+    ));
+  }
+  const ordered = [];
+  const walk = (parentId, depth) => {
+    const key = parentId ? String(parentId) : '__root__';
+    (byParent.get(key) || []).forEach((category) => {
+      ordered.push({ ...category, __depth: depth });
+      walk(category.id, depth + 1);
+    });
+  };
+  walk(null, 0);
+  return ordered;
+}
+
+function categorySelectLabel(category) {
+  const depth = category.__depth || 0;
+  return `${'-- '.repeat(depth)}${category.name}`;
 }
 
 export default function ProjectDetail() {
@@ -181,16 +383,457 @@ export default function ProjectDetail() {
 
       <div className="tabs">
         <button className={`tab ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>Overview</button>
+        <button className={`tab ${tab === 'instructions' ? 'active' : ''}`} onClick={() => setTab('instructions')}>Instructions</button>
+        <button className={`tab ${tab === 'photos' ? 'active' : ''}`} onClick={() => setTab('photos')}>Photos</button>
         <button className={`tab ${tab === 'parts' ? 'active' : ''}`} onClick={() => setTab('parts')}>Parts ({project.parts.length})</button>
         <button className={`tab ${tab === 'files' ? 'active' : ''}`} onClick={() => setTab('files')}>Files ({project.files.length})</button>
       </div>
 
       {tab === 'overview' && <OverviewTab project={project} setProject={setProject} reload={load} flash={flash} />}
+      {tab === 'instructions' && <InstructionsTab project={project} setProject={setProject} flash={flash} onAddPart={() => setAddPart(true)} />}
+      {tab === 'photos' && <PhotosTab project={project} setProject={setProject} flash={flash} />}
       {tab === 'parts' && <PartsTab project={project} onAdd={() => setAddPart(true)} reload={load} />}
       {tab === 'files' && <FilesTab project={project} reload={load} flash={flash} />}
 
       {editMeta && <ProjectMetaModal project={project} onClose={() => setEditMeta(false)} onSave={() => { setEditMeta(false); load(); }} />}
       {addPart && <AddPartModal project={project} onClose={() => setAddPart(false)} onSave={() => { setAddPart(false); load(); }} />}
+    </div>
+  );
+}
+
+function PhotosTab({ project, setProject, flash }) {
+  const [portable, setPortable] = useState(() => emptyPortableData(project.portable_data));
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('Saved');
+  const [folderName, setFolderName] = useState('');
+  const [selectedFolderId, setSelectedFolderId] = useState('');
+  const [expandedPhoto, setExpandedPhoto] = useState(null);
+  const [markupPhoto, setMarkupPhoto] = useState(null);
+
+  useEffect(() => {
+    setPortable(emptyPortableData(project.portable_data));
+  }, [project.id, project.portable_data]);
+
+  useEffect(() => {
+    const folders = portable.photo_library || [];
+    if (!folders.length) {
+      if (selectedFolderId) setSelectedFolderId('');
+      return;
+    }
+    if (!folders.some((folder) => String(folder.id) === String(selectedFolderId))) {
+      setSelectedFolderId(String(folders[0].id));
+    }
+  }, [portable.photo_library, selectedFolderId]);
+
+  const persistPortable = useCallback(async (nextPortable, quiet = true) => {
+    setSaving(true);
+    try {
+      const updated = await api.updateProject(project.id, {
+        name: project.name,
+        status: project.status,
+        notes: project.notes,
+        portable_data: nextPortable,
+      });
+      setProject((current) => ({ ...current, ...updated, portable_data: emptyPortableData(updated.portable_data) }));
+      setStatus('Saved');
+      if (!quiet) flash('Project photos saved');
+    } catch (error) {
+      setStatus('Could not save');
+      flash(error.message, true);
+    } finally {
+      setSaving(false);
+    }
+  }, [flash, project.id, project.name, project.notes, project.status, setProject]);
+
+  useEffect(() => {
+    if (JSON.stringify(emptyPortableData(project.portable_data).photo_library) === JSON.stringify(portable.photo_library)) {
+      setStatus('Saved');
+      return undefined;
+    }
+    setStatus('Saving...');
+    const timer = setTimeout(() => persistPortable(portable), 700);
+    return () => clearTimeout(timer);
+  }, [persistPortable, portable, project.portable_data]);
+
+  const setPhotoLibrary = (updater) => {
+    setPortable((current) => {
+      const next = typeof updater === 'function' ? updater(current.photo_library) : updater;
+      return { ...current, photo_library: next };
+    });
+  };
+
+  const addFolder = () => {
+    const name = folderName.trim();
+    if (!name) return;
+    const nextId = makeLocalId('photo-folder');
+    setPhotoLibrary((current) => [
+      ...current,
+      { id: nextId, name, order_index: current.length, photos: [] },
+    ]);
+    setSelectedFolderId(nextId);
+    setFolderName('');
+  };
+
+  const uploadPhotos = async (folderId, files) => {
+    const uploads = Array.from(files || []);
+    if (!uploads.length) return;
+    const uploaded = [];
+    for (const file of uploads) {
+      const form = new FormData();
+      form.append('image', file);
+      const result = await api.uploadProjectNoteImage(project.id, form);
+      uploaded.push({
+        id: makeLocalId('photo'),
+        name: file.name.replace(/\.[^.]+$/, ''),
+        note: '',
+        taken_at: new Date().toISOString(),
+        order_index: 0,
+        original_filename: file.name,
+        original_image_path: result.image_path,
+        markup_image_path: '',
+        thumbnail_path: null,
+      });
+    }
+    setPhotoLibrary((current) => current.map((folder) => (
+      folder.id !== folderId
+        ? folder
+        : {
+          ...folder,
+          photos: [
+            ...(folder.photos || []),
+            ...uploaded.map((photo, index) => ({ ...photo, order_index: (folder.photos || []).length + index })),
+          ],
+        }
+    )));
+  };
+
+  const updateFolder = (folderId, patch) => {
+    setPhotoLibrary((current) => current.map((folder) => folder.id === folderId ? { ...folder, ...patch } : folder));
+  };
+
+  const updatePhoto = (folderId, photoId, patch) => {
+    setPhotoLibrary((current) => current.map((folder) => (
+      folder.id !== folderId
+        ? folder
+        : {
+          ...folder,
+          photos: (folder.photos || []).map((photo) => photo.id === photoId ? { ...photo, ...patch } : photo),
+        }
+    )));
+  };
+
+  const movePhoto = (folderId, photoId, direction) => {
+    setPhotoLibrary((current) => current.map((folder) => {
+      if (folder.id !== folderId) return folder;
+      const photos = [...(folder.photos || [])];
+      const index = photos.findIndex((photo) => photo.id === photoId);
+      const swap = direction === 'up' ? index - 1 : index + 1;
+      if (index < 0 || swap < 0 || swap >= photos.length) return folder;
+      [photos[index], photos[swap]] = [photos[swap], photos[index]];
+      return { ...folder, photos: photos.map((photo, orderIndex) => ({ ...photo, order_index: orderIndex })) };
+    }));
+  };
+
+  const allPhotos = flattenProjectPhotos(portable.photo_library);
+  const selectedFolder = portable.photo_library.find((folder) => String(folder.id) === String(selectedFolderId)) || null;
+  const deleteSelectedFolder = () => {
+    if (!selectedFolder) return;
+    setPhotoLibrary((current) => current
+      .filter((item) => item.id !== selectedFolder.id)
+      .map((item, index) => ({ ...item, order_index: index })));
+  };
+
+  return (
+    <div className="photos-tab-layout">
+      <section className="card photos-folder-sidebar">
+        <div className="section-toolbar">
+          <strong>Photo Folders</strong>
+          <span className="photos-status">{saving ? 'Saving...' : status}</span>
+        </div>
+        <div className="photos-folder-create">
+          <input value={folderName} onChange={(e) => setFolderName(e.target.value)} placeholder="New folder name" />
+          <button className="btn btn-secondary btn-sm" onClick={addFolder}>Add Folder</button>
+        </div>
+        <div className="photos-folder-list">
+          {!portable.photo_library.length && <p className="muted">Add a folder to start collecting build photos.</p>}
+          {portable.photo_library.map((folder) => (
+            <button
+              key={folder.id}
+              className={`photos-folder-item ${String(folder.id) === String(selectedFolderId) ? 'active' : ''}`}
+              onClick={() => setSelectedFolderId(String(folder.id))}
+            >
+              <strong>{folder.name || 'Untitled folder'}</strong>
+              <span>{(folder.photos || []).length} photo{(folder.photos || []).length === 1 ? '' : 's'}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+      <section className="card photos-folder-content">
+        {!selectedFolder ? (
+          <p className="muted">Select a folder to view its photos.</p>
+        ) : (
+          <>
+            <div className="section-toolbar">
+              <input
+                className="folder-title-input"
+                value={selectedFolder.name}
+                onChange={(e) => updateFolder(selectedFolder.id, { name: e.target.value })}
+              />
+              <div className="button-row">
+                <label className="btn btn-secondary btn-sm">
+                  Upload Photos
+                  <input hidden type="file" accept="image/*" multiple onChange={(e) => uploadPhotos(selectedFolder.id, e.target.files).catch((error) => flash(error.message, true))} />
+                </label>
+                <button className="btn btn-danger btn-sm" onClick={deleteSelectedFolder}>Delete Folder</button>
+              </div>
+            </div>
+            {(selectedFolder.photos || []).length ? (
+              <div className="photo-library-grid editable-photo-grid">
+                {(selectedFolder.photos || []).map((photo, index) => (
+                  <article key={photo.id} className="photo-library-card editable-photo-card">
+                    <button className="detail-image-button photo-card-preview" onClick={() => setExpandedPhoto({ ...photo, folder_id: selectedFolder.id, folder_name: selectedFolder.name })}>
+                      <img src={imageUrl(photo.markup_image_path || photo.original_image_path)} alt={photo.name || 'Project photo'} />
+                    </button>
+                    <input
+                      value={photo.name || ''}
+                      onChange={(e) => updatePhoto(selectedFolder.id, photo.id, { name: e.target.value })}
+                      placeholder="Photo name"
+                    />
+                    <textarea
+                      value={photo.note || ''}
+                      onChange={(e) => updatePhoto(selectedFolder.id, photo.id, { note: e.target.value })}
+                      rows={2}
+                      placeholder="Photo note"
+                    />
+                    <div className="button-row compact-actions">
+                      <button className="btn btn-secondary btn-sm" disabled={index === 0} onClick={() => movePhoto(selectedFolder.id, photo.id, 'up')}>Up</button>
+                      <button className="btn btn-secondary btn-sm" disabled={index === (selectedFolder.photos || []).length - 1} onClick={() => movePhoto(selectedFolder.id, photo.id, 'down')}>Down</button>
+                      <button className="btn btn-secondary btn-sm" onClick={() => setMarkupPhoto({ ...photo, folder_id: selectedFolder.id })}>Markup</button>
+                      <a className="btn btn-secondary btn-sm" href={imageUrl(photo.markup_image_path || photo.original_image_path)} download={photo.original_filename || `${photo.name || 'photo'}.png`}>Download</a>
+                      <button className="btn btn-danger btn-sm" onClick={() => updateFolder(selectedFolder.id, { photos: (selectedFolder.photos || []).filter((item) => item.id !== photo.id).map((item, orderIndex) => ({ ...item, order_index: orderIndex })) })}>Delete</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : <p className="muted">No photos in this folder yet.</p>}
+          </>
+        )}
+      </section>
+      {expandedPhoto && (
+        <ModalOverlay className="image-expanded-overlay" onClose={() => setExpandedPhoto(null)}>
+          <div className="image-expanded-modal">
+            <div className="viewer-toolbar">
+              <strong>{expandedPhoto.name || 'Project photo'}</strong>
+              <span>{expandedPhoto.folder_name}</span>
+              <button className="btn btn-secondary btn-sm" onClick={() => setExpandedPhoto(null)}>Close</button>
+            </div>
+            <img src={imageUrl(expandedPhoto.markup_image_path || expandedPhoto.original_image_path)} alt={expandedPhoto.name || 'Project photo'} />
+            {expandedPhoto.note ? <p className="notes-text">{expandedPhoto.note}</p> : null}
+          </div>
+        </ModalOverlay>
+      )}
+      {markupPhoto && (
+        <PhotoMarkupModal
+          src={imageUrl(markupPhoto.original_image_path)}
+          onClose={() => setMarkupPhoto(null)}
+          onSave={async (file) => {
+            const form = new FormData();
+            form.append('image', file);
+            const result = await api.uploadProjectNoteImage(project.id, form);
+            updatePhoto(markupPhoto.folder_id, markupPhoto.id, { markup_image_path: result.image_path });
+            setMarkupPhoto(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function InstructionsTab({ project, setProject, flash, onAddPart }) {
+  const [portable, setPortable] = useState(() => emptyPortableData(project.portable_data));
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState('Saved');
+  const [createPartOpen, setCreatePartOpen] = useState(false);
+  const photoMap = useMemo(() => new Map(flattenProjectPhotos(portable.photo_library).map((photo) => [String(photo.id), photo])), [portable.photo_library]);
+
+  useEffect(() => {
+    setPortable(emptyPortableData(project.portable_data));
+  }, [project.id, project.portable_data]);
+
+  const persistPortable = useCallback(async (nextPortable, quiet = true) => {
+    setSaving(true);
+    try {
+      const updated = await api.updateProject(project.id, {
+        name: project.name,
+        status: project.status,
+        notes: project.notes,
+        portable_data: nextPortable,
+      });
+      setProject((current) => ({ ...current, ...updated, portable_data: emptyPortableData(updated.portable_data) }));
+      setStatus('Saved');
+      if (!quiet) flash('Instructions saved');
+    } catch (error) {
+      setStatus('Could not save');
+      flash(error.message, true);
+    } finally {
+      setSaving(false);
+    }
+  }, [flash, project.id, project.name, project.notes, project.status, setProject]);
+
+  useEffect(() => {
+    if (JSON.stringify(emptyPortableData(project.portable_data).instructions) === JSON.stringify(portable.instructions)) {
+      setStatus('Saved');
+      return undefined;
+    }
+    setStatus('Saving...');
+    const timer = setTimeout(() => persistPortable(portable), 700);
+    return () => clearTimeout(timer);
+  }, [persistPortable, portable, project.portable_data]);
+
+  const uploadInlineImage = async (file) => {
+    const form = new FormData();
+    form.append('image', file);
+    const result = await api.uploadProjectNoteImage(project.id, form);
+    return result.url;
+  };
+
+  const updateInstructions = (patch) => {
+    setPortable((current) => ({ ...current, instructions: { ...current.instructions, ...patch } }));
+  };
+
+  const updateStep = (stepId, patch) => {
+    updateInstructions({
+      steps: (portable.instructions.steps || []).map((step) => step.id === stepId ? { ...step, ...patch } : step),
+    });
+  };
+
+  const moveStep = (stepId, direction) => {
+    const steps = [...(portable.instructions.steps || [])];
+    const index = steps.findIndex((step) => step.id === stepId);
+    const swap = direction === 'up' ? index - 1 : index + 1;
+    if (index < 0 || swap < 0 || swap >= steps.length) return;
+    [steps[index], steps[swap]] = [steps[swap], steps[index]];
+    updateInstructions({ steps: steps.map((step, orderIndex) => ({ ...step, order_index: orderIndex })) });
+  };
+
+  const addStep = () => {
+    updateInstructions({
+      steps: [
+        ...(portable.instructions.steps || []),
+        {
+          id: makeLocalId('instruction-step'),
+          title: '',
+          body: '',
+          photo_id: '',
+          order_index: (portable.instructions.steps || []).length,
+        },
+      ],
+    });
+  };
+
+  const openPrintable = () => {
+    const popup = window.open('', '_blank', 'noopener,noreferrer');
+    if (!popup) return;
+    popup.document.write(buildInstructionsPrintHtml({ ...project, portable_data: portable }));
+    popup.document.close();
+  };
+
+  return (
+    <div className="dashboard-grid instructions-editor-layout">
+      <section className="card notes-card">
+        <div className="section-toolbar">
+          <strong>Instruction Intro</strong>
+          <span className="autosave-status">{saving ? 'Saving...' : status}</span>
+        </div>
+        <RichEditor
+          value={portable.instructions.intro}
+          onChange={(value) => updateInstructions({ intro: value })}
+          onUploadImage={uploadInlineImage}
+          placeholder="Add the project intro, overview, warnings, and setup notes..."
+        />
+      </section>
+      <section className="card">
+        <div className="section-toolbar">
+          <strong>Parts List</strong>
+          <div className="button-row">
+            <button className="btn btn-secondary btn-sm" onClick={onAddPart}>Link Part</button>
+            <button className="btn btn-primary btn-sm" onClick={() => setCreatePartOpen(true)}>New Part</button>
+            <button className="btn btn-secondary btn-sm" onClick={openPrintable}>Printable</button>
+          </div>
+        </div>
+        {project.parts.length ? (
+          <div className="project-part-qty-list">
+            {project.parts.map((part) => (
+              <div key={part.project_part_id} className="project-part-qty-row">
+                <span>{part.name}</span>
+                <strong>Qty {Number(part.quantity) || 1}</strong>
+              </div>
+            ))}
+          </div>
+        ) : <p className="muted">Link parts to show a build parts list here.</p>}
+      </section>
+      <section className="card instruction-steps-card">
+        <div className="section-toolbar">
+          <strong>Instruction Steps</strong>
+          <button className="btn btn-primary btn-sm" onClick={addStep}>Add Step</button>
+        </div>
+        {(portable.instructions.steps || []).length ? (
+          <div className="instruction-step-list editable-instruction-list">
+            {(portable.instructions.steps || [])
+              .slice()
+              .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+              .map((step, index, rows) => {
+                const photo = step.photo_id ? photoMap.get(String(step.photo_id)) : null;
+                return (
+                  <article key={step.id} className="instruction-step-card editable-instruction-card">
+                    <div className="instruction-step-toolbar">
+                      <strong>Step {index + 1}</strong>
+                      <div className="button-row compact-actions">
+                        <button className="btn btn-secondary btn-sm" disabled={index === 0} onClick={() => moveStep(step.id, 'up')}>Up</button>
+                        <button className="btn btn-secondary btn-sm" disabled={index === rows.length - 1} onClick={() => moveStep(step.id, 'down')}>Down</button>
+                        <button className="btn btn-danger btn-sm" onClick={() => updateInstructions({ steps: (portable.instructions.steps || []).filter((item) => item.id !== step.id).map((item, orderIndex) => ({ ...item, order_index: orderIndex })) })}>Delete</button>
+                      </div>
+                    </div>
+                    <input
+                      value={step.title || ''}
+                      onChange={(e) => updateStep(step.id, { title: e.target.value })}
+                      placeholder="Step title"
+                    />
+                    <select value={step.photo_id || ''} onChange={(e) => updateStep(step.id, { photo_id: e.target.value })}>
+                      <option value="">No project photo</option>
+                      {flattenProjectPhotos(portable.photo_library).map((item) => (
+                        <option key={item.id} value={item.id}>{item.folder_name} / {item.name || 'Photo'}</option>
+                      ))}
+                    </select>
+                    <RichEditor
+                      value={step.body || ''}
+                      onChange={(value) => updateStep(step.id, { body: value })}
+                      onUploadImage={uploadInlineImage}
+                      placeholder="Describe the step, measurements, wiring, checks, or firmware actions..."
+                    />
+                    {photo?.original_image_path ? (
+                      <div className="instruction-photo-preview">
+                        <img src={imageUrl(photo.markup_image_path || photo.original_image_path)} alt={photo.name || step.title || 'Instruction photo'} />
+                        <span>{photo.name || 'Selected project photo'}</span>
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+          </div>
+        ) : <p className="muted">No instruction steps yet.</p>}
+      </section>
+      {createPartOpen && (
+        <CreateProjectPartModal
+          project={project}
+          onClose={() => setCreatePartOpen(false)}
+          onSave={async () => {
+            setCreatePartOpen(false);
+            const updated = await api.getProject(project.id);
+            setProject(updated);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -255,6 +898,88 @@ function OverviewTab({ project, setProject, reload, flash }) {
         <StepTagsCard project={project} setProject={setProject} />
         <ChecklistCard project={project} setProject={setProject} />
         <LatestFiles files={project.files} />
+      </div>
+    </div>
+  );
+}
+
+function PhotoMarkupModal({ src, onClose, onSave }) {
+  const canvasRef = useRef(null);
+  const [drawing, setDrawing] = useState(false);
+  const [lineColor, setLineColor] = useState('#ff3b30');
+  const [lineWidth, setLineWidth] = useState(4);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const source = new Image();
+    source.crossOrigin = 'anonymous';
+    source.onload = () => {
+      const maxWidth = 1100;
+      const scale = Math.min(1, maxWidth / source.naturalWidth);
+      canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+    };
+    source.src = src;
+  }, [src]);
+
+  const point = (event) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  };
+
+  const start = (event) => {
+    const ctx = canvasRef.current.getContext('2d');
+    const p = point(event);
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    setDrawing(true);
+  };
+
+  const draw = (event) => {
+    if (!drawing) return;
+    const ctx = canvasRef.current.getContext('2d');
+    const p = point(event);
+    ctx.lineTo(p.x, p.y);
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  };
+
+  const save = async () => {
+    const canvas = canvasRef.current;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return;
+    await onSave(new File([blob], `project-photo-markup-${Date.now()}.png`, { type: 'image/png' }));
+  };
+
+  return (
+    <div className="markup-overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="markup-modal">
+        <div className="markup-toolbar">
+          <strong>Markup Photo</strong>
+          <label>
+            Color
+            <input type="color" value={lineColor} onChange={(e) => setLineColor(e.target.value)} />
+          </label>
+          <label>
+            Size
+            <input type="range" min="2" max="14" value={lineWidth} onChange={(e) => setLineWidth(Number(e.target.value))} />
+          </label>
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={save}>Save Markup</button>
+        </div>
+        <canvas
+          ref={canvasRef}
+          onMouseDown={start}
+          onMouseMove={draw}
+          onMouseUp={() => setDrawing(false)}
+          onMouseLeave={() => setDrawing(false)}
+        />
       </div>
     </div>
   );
@@ -1106,9 +1831,9 @@ function FilesTab({ project, reload, flash }) {
   const [editingTrackers, setEditingTrackers] = useState(false);
   const [files, setFiles] = useState([]);
   const [versionNote, setVersionNote] = useState('');
-  const viewableFiles = project.files.filter((file) => file.is_latest && isViewableFile(file));
-  const [selectedFileId, setSelectedFileId] = useState(viewableFiles[0]?.id || '');
-  const selectedFile = viewableFiles.find((file) => String(file.id) === String(selectedFileId)) || viewableFiles[0];
+  const [viewerScope, setViewerScope] = useState('latest');
+  const [listScope, setListScope] = useState('latest');
+  const [expandedGroups, setExpandedGroups] = useState({});
 
   useEffect(() => {
     api.getProjectTemplate().then((data) => {
@@ -1117,19 +1842,23 @@ function FilesTab({ project, reload, flash }) {
     }).catch((e) => flash(e.message, true));
   }, []);
 
+  const trackers = template?.file_trackers || [];
+  const selectedTracker = trackers.find((tracker) => tracker.key === trackerKey) || trackers[0];
+  const accept = selectedTracker ? normalizeExtensions(selectedTracker.extensions).join(',') : '';
+  const groupedFiles = useMemo(() => groupProjectFilesForDisplay(project.files, trackers), [project.files, trackers]);
+  const viewableFiles = useMemo(() => {
+    const source = viewerScope === 'all' ? project.files : project.files.filter((file) => file.is_latest);
+    return source.filter((file) => isViewableFile(file));
+  }, [project.files, viewerScope]);
+  const [selectedFileId, setSelectedFileId] = useState(viewableFiles[0]?.id || '');
+  const selectedFile = viewableFiles.find((file) => String(file.id) === String(selectedFileId)) || viewableFiles[0];
+
   useEffect(() => {
     if (!selectedFileId && viewableFiles[0]) setSelectedFileId(viewableFiles[0].id);
     if (selectedFileId && !viewableFiles.some((file) => String(file.id) === String(selectedFileId))) {
       setSelectedFileId(viewableFiles[0]?.id || '');
     }
   }, [selectedFileId, viewableFiles]);
-
-  const trackers = template?.file_trackers || [];
-  const selectedTracker = trackers.find((tracker) => tracker.key === trackerKey) || trackers[0];
-  const accept = selectedTracker ? normalizeExtensions(selectedTracker.extensions).join(',') : '';
-  const categories = useMemo(() => {
-    return [...new Set(project.files.map((f) => f.file_category || 'Other'))];
-  }, [project.files]);
 
   const upload = async () => {
     if (!files.length) return;
@@ -1183,24 +1912,88 @@ function FilesTab({ project, reload, flash }) {
           <button className="btn btn-primary" disabled={!files.length} onClick={upload}>Upload{files.length > 1 ? ` ${files.length}` : ''}</button>
           <button className="btn btn-secondary" onClick={() => setEditingTrackers(true)}>Edit File Types</button>
         </section>
-        {categories.map((cat) => {
-          const files = project.files.filter((item) => item.file_category === cat);
-          if (files.length === 0) return null;
+        <section className="card">
+          <div className="section-toolbar">
+            <strong>Files</strong>
+            <div className="viewer-scope-toggle">
+              <button className={listScope === 'latest' ? 'active' : ''} onClick={() => setListScope('latest')}>Latest Files</button>
+              <button className={listScope === 'all' ? 'active' : ''} onClick={() => setListScope('all')}>All Files</button>
+            </div>
+          </div>
+        </section>
+        {groupedFiles.map((trackerGroup) => {
+          const groups = trackerGroup.groups.filter((group) => (
+            listScope === 'all' || group.revisions.some((revision) => revision.is_latest)
+          ));
+          if (groups.length === 0) return null;
           return (
-            <section key={cat} className="card">
-              <h3>{cat}</h3>
-              {files.map((item) => (
-                <div key={item.id} className="file-row">
-                  <a href={projectFileUrl(item.file_path)} target="_blank" rel="noreferrer">{item.original_filename}</a>
-                  <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(item.id)}>Download</a>
-                  <span>{new Date(item.uploaded_at).toLocaleDateString()}</span>
-                  {item.version_note && <em className="file-note">{item.version_note}</em>}
-                  <button className={`btn btn-sm ${item.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(item)}>
-                    {item.is_latest ? 'Latest' : 'Mark Latest'}
-                  </button>
-                  <button className="btn-icon" onClick={() => remove(item)}>x</button>
-                </div>
-              ))}
+            <section key={trackerGroup.key} className="card file-tracker-card">
+              <div className="file-tracker-title">
+                <h3 style={{ color: trackerGroup.color }}>{trackerGroup.label}</h3>
+                <span className="muted">{groups.length} group{groups.length === 1 ? '' : 's'}</span>
+              </div>
+              {groups.map((group) => {
+                const expanded = !!expandedGroups[group.key];
+                const visibleRevisions = expanded ? group.revisions : group.revisions.filter((revision) => revision.is_latest);
+                const hasHiddenRevisions = group.revisions.length > visibleRevisions.length;
+                return (
+                  <div key={group.key} className="file-group-card">
+                    <div className="file-group-header">
+                      <div>
+                        <strong>{group.kind === 'folder' ? (group.folderPath || group.label) : group.label}</strong>
+                        <small>{group.kind === 'folder' ? 'Uploaded folder' : 'Tracked file'}</small>
+                      </div>
+                      {hasHiddenRevisions && (
+                        <button className="btn btn-secondary btn-sm" onClick={() => setExpandedGroups((current) => ({ ...current, [group.key]: !current[group.key] }))}>
+                          {expanded ? 'Hide Older' : `Show Older (${group.revisions.length - visibleRevisions.length})`}
+                        </button>
+                      )}
+                    </div>
+                    <div className="file-revision-list">
+                      {visibleRevisions.map((revision) => (
+                        revision.kind === 'folder' ? (
+                          <div key={revision.key} className="file-revision-card folder-revision-card">
+                            <div className="file-row revision-row">
+                              <div className="file-row-main">
+                                <strong>{revision.label}</strong>
+                                <small>{revision.files.length} file{revision.files.length === 1 ? '' : 's'}</small>
+                              </div>
+                              <span>{revision.uploaded_at ? new Date(revision.uploaded_at).toLocaleDateString() : ''}</span>
+                              {revision.version_note && <em className="file-note">{revision.version_note}</em>}
+                              {revision.is_latest && <span className="badge badge-blue">Latest</span>}
+                            </div>
+                            <div className="folder-children-list">
+                              {revision.files.map((item) => (
+                                <div key={item.id} className="file-row folder-child-row">
+                                  <button className="btn btn-primary btn-sm viewer-open-btn" onClick={() => setSelectedFileId(item.id)}>Preview</button>
+                                  <a href={projectFileUrl(item.file_path)} target="_blank" rel="noreferrer">{item.original_filename}</a>
+                                  <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(item.id)}>Download</a>
+                                  <button className={`btn btn-sm ${item.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(item)}>
+                                    {item.is_latest ? 'Latest' : 'Mark Latest'}
+                                  </button>
+                                  <button className="btn-icon" onClick={() => remove(item)}>x</button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : (
+                          <div key={revision.key} className="file-row revision-row">
+                            <button className="btn btn-primary btn-sm viewer-open-btn" onClick={() => setSelectedFileId(revision.file.id)}>Preview</button>
+                            <a href={projectFileUrl(revision.file.file_path)} target="_blank" rel="noreferrer">{revision.file.original_filename}</a>
+                            <a className="btn btn-secondary btn-sm" href={projectFileDownloadUrl(revision.file.id)}>Download</a>
+                            <span>{revision.uploaded_at ? new Date(revision.uploaded_at).toLocaleDateString() : ''}</span>
+                            {revision.version_note && <em className="file-note">{revision.version_note}</em>}
+                            <button className={`btn btn-sm ${revision.file.is_latest ? 'btn-primary' : 'btn-secondary'}`} onClick={() => toggleLatest(revision.file)}>
+                              {revision.file.is_latest ? 'Latest' : 'Mark Latest'}
+                            </button>
+                            <button className="btn-icon" onClick={() => remove(revision.file)}>x</button>
+                          </div>
+                        )
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
             </section>
           );
         })}
@@ -1209,6 +2002,10 @@ function FilesTab({ project, reload, flash }) {
       <section className="card file-viewer-card">
         <div className="card-title-row">
           <h3>File Viewer</h3>
+          <div className="viewer-scope-toggle">
+            <button className={viewerScope === 'latest' ? 'active' : ''} onClick={() => setViewerScope('latest')}>Latest Files</button>
+            <button className={viewerScope === 'all' ? 'active' : ''} onClick={() => setViewerScope('all')}>All Files</button>
+          </div>
           {selectedFile && <a className="btn btn-primary btn-sm viewer-open-btn" href={projectFileUrl(selectedFile.file_path)} target="_blank" rel="noreferrer">Open File</a>}
         </div>
         {viewableFiles.length > 0 ? (
@@ -1355,6 +2152,7 @@ function AddPartModal({ project, onClose, onSave }) {
   };
 
   const already = new Set(project.parts.map((part) => part.id));
+  const categoryOptions = useMemo(() => orderedCategoryOptions(categories), [categories]);
 
   return (
     <ModalOverlay onClose={onClose}>
@@ -1368,7 +2166,7 @@ function AddPartModal({ project, onClose, onSave }) {
           <label>Category</label>
           <select value={category} onChange={(e) => setCategory(e.target.value)}>
             <option value="">All categories</option>
-            {categories.map((cat) => <option key={cat.id} value={cat.id}>{categoryOptionLabel(cat, categories)}</option>)}
+            {categoryOptions.map((cat) => <option key={cat.id} value={cat.id}>{categorySelectLabel(cat)}</option>)}
           </select>
         </div>
         {error && <div className="alert alert-error">{error}</div>}
@@ -1388,6 +2186,111 @@ function AddPartModal({ project, onClose, onSave }) {
         )}
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </ModalOverlay>
+  );
+}
+
+function CreateProjectPartModal({ project, onClose, onSave }) {
+  const [categories, setCategories] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [imageFile, setImageFile] = useState(null);
+  const [documentFiles, setDocumentFiles] = useState([]);
+  const [form, setForm] = useState({
+    name: '',
+    category_id: '',
+    product_url: '',
+    storage_location: '',
+    spec_summary: '',
+    notes: '',
+  });
+
+  useEffect(() => {
+    api.getCategories().then(setCategories).catch((err) => setError(err.message));
+  }, []);
+
+  const setField = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const categoryOptions = useMemo(() => orderedCategoryOptions(categories), [categories]);
+
+  const save = async () => {
+    if (!form.name.trim()) {
+      setError('Part name is required');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const created = await api.createPart({
+        ...form,
+        name: form.name.trim(),
+        category_id: form.category_id || null,
+      });
+      if (imageFile) {
+        const imageForm = new FormData();
+        imageForm.append('image', imageFile);
+        await api.uploadPartImage(created.id, imageForm);
+      }
+      for (const file of documentFiles) {
+        const docForm = new FormData();
+        docForm.append('file', file);
+        await api.uploadPartDocument(created.id, docForm);
+      }
+      await api.addProjectPart(project.id, { part_id: created.id });
+      onSave();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ModalOverlay onClose={onClose}>
+      <div className="modal large-modal">
+        <h2>New Part</h2>
+        {error && <div className="alert alert-error">{error}</div>}
+        <div className="form-grid">
+          <div className="form-group">
+            <label>Name</label>
+            <input value={form.name} onChange={(e) => setField('name', e.target.value)} autoFocus />
+          </div>
+          <div className="form-group">
+            <label>Category</label>
+            <select value={form.category_id} onChange={(e) => setField('category_id', e.target.value)}>
+              <option value="">Uncategorized</option>
+              {categoryOptions.map((cat) => <option key={cat.id} value={cat.id}>{categorySelectLabel(cat)}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label>Product URL</label>
+            <input value={form.product_url} onChange={(e) => setField('product_url', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Storage Location</label>
+            <input value={form.storage_location} onChange={(e) => setField('storage_location', e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Image</label>
+            <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+          </div>
+          <div className="form-group">
+            <label>Documents</label>
+            <input type="file" multiple onChange={(e) => setDocumentFiles(Array.from(e.target.files || []))} />
+          </div>
+        </div>
+        <div className="form-group">
+          <label>Spec Summary</label>
+          <textarea value={form.spec_summary} onChange={(e) => setField('spec_summary', e.target.value)} rows={6} />
+        </div>
+        <div className="form-group">
+          <label>Notes</label>
+          <textarea value={form.notes} onChange={(e) => setField('notes', e.target.value)} rows={4} />
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? 'Saving...' : 'Create And Link'}</button>
         </div>
       </div>
     </ModalOverlay>

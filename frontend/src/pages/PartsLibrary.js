@@ -5,7 +5,7 @@ import { API_BASE, api } from '../api/client';
 import ModalOverlay from '../components/ModalOverlay';
 
 function imageUrl(path) {
-  return path ? `${API_BASE}/files/images/${path}` : '';
+  return path ? `${API_BASE}/files/images/${encodeURIComponent(path)}` : '';
 }
 
 function docUrl(path) {

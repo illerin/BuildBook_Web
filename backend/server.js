@@ -10,12 +10,23 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-import { BACKUP_TABLES, validateBackupData, validateProjectExportManifest } from './importExportSchema.js';
+import {
+  BACKUP_CAPABILITIES,
+  BACKUP_OPTIONAL_CAPABILITIES,
+  BACKUP_REQUIRED_CAPABILITIES,
+  BACKUP_TABLES,
+  PORTABLE_FORMAT_VERSION,
+  PROJECT_EXPORT_CAPABILITIES,
+  PROJECT_EXPORT_OPTIONAL_CAPABILITIES,
+  PROJECT_EXPORT_REQUIRED_CAPABILITIES,
+  validateBackupData,
+  validateProjectExportManifest,
+} from './importExportSchema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.19';
+const APP_VERSION = '0.2.43';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -34,9 +45,52 @@ const BACKUP_DIR = path.join(UPLOAD_DIR, 'backup-tmp');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+function detectImageMime(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.png') return 'image/png';
+  if (ext === '.gif') return 'image/gif';
+  if (ext === '.webp') return 'image/webp';
+  if (ext === '.svg') return 'image/svg+xml';
+  if (ext === '.bmp') return 'image/bmp';
+  if (ext === '.avif') return 'image/avif';
+  if (ext === '.ico') return 'image/x-icon';
+
+  try {
+    const handle = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(512);
+    const bytesRead = fs.readSync(handle, buffer, 0, buffer.length, 0);
+    fs.closeSync(handle);
+    const slice = buffer.subarray(0, bytesRead);
+    if (slice.length >= 3 && slice[0] === 0xff && slice[1] === 0xd8 && slice[2] === 0xff) return 'image/jpeg';
+    if (slice.length >= 8 && slice[0] === 0x89 && slice[1] === 0x50 && slice[2] === 0x4e && slice[3] === 0x47) return 'image/png';
+    if (slice.length >= 6 && slice.subarray(0, 6).toString('ascii') === 'GIF87a') return 'image/gif';
+    if (slice.length >= 6 && slice.subarray(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+    if (slice.length >= 12 && slice.subarray(0, 4).toString('ascii') === 'RIFF' && slice.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+    const text = slice.toString('utf8').trimStart();
+    if (text.startsWith('<svg') || text.startsWith('<?xml')) return 'image/svg+xml';
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function encodePathSegment(value = '') {
+  return encodeURIComponent(String(value));
+}
+
+function imageFileUrl(value = '') {
+  return `/files/images/${encodePathSegment(value)}`;
+}
+
 app.use('/files/documents', express.static(DOC_DIR));
 app.use('/files/projects', express.static(PROJECT_DIR));
-app.use('/files/images', express.static(IMAGE_DIR));
+app.use('/files/images', express.static(IMAGE_DIR, {
+  setHeaders(res, filePath) {
+    const detected = detectImageMime(filePath);
+    if (detected) res.type(detected);
+  },
+}));
 
 const safeName = (name) => name.replace(/[^a-zA-Z0-9._-]/g, '_');
 const makeStorage = (dir) => multer.diskStorage({
@@ -61,13 +115,13 @@ const uploadBackup = multer({ storage: makeStorage(BACKUP_DIR) });
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 const DEFAULT_FILE_TRACKERS = [
-  { key: 'drawing', label: 'Drawings', extensions: '.dwg,.dxf' },
-  { key: 'firmware', label: 'Firmware', extensions: '.ino,.cpp,.h' },
-  { key: 'pcb', label: 'PCB Files', extensions: '.kicad_pcb,.kicad_sch,.brd,.sch' },
-  { key: 'bom', label: 'PCB BOM', extensions: '.xlsx,.xls,.csv,.tsv' },
-  { key: 'enclosure', label: 'Enclosure', extensions: '.stl,.step,.3mf' },
-  { key: 'datasheet', label: 'Datasheets', extensions: '.pdf' },
-  { key: 'other', label: 'Other', extensions: '' },
+  { key: 'drawing', label: 'Drawings', extensions: '.dwg,.dxf', color: '#c084fc', order_index: 0 },
+  { key: 'firmware', label: 'Firmware', extensions: '.ino,.cpp,.h', color: '#f97316', order_index: 1 },
+  { key: 'pcb', label: 'PCB Files', extensions: '.kicad_pcb,.kicad_sch,.brd,.sch', color: '#22c55e', order_index: 2 },
+  { key: 'bom', label: 'PCB BOM', extensions: '.xlsx,.xls,.csv,.tsv', color: '#0ea5e9', order_index: 3 },
+  { key: 'enclosure', label: 'Enclosure', extensions: '.stl,.step,.3mf', color: '#eab308', order_index: 4 },
+  { key: 'datasheet', label: 'Datasheets', extensions: '.pdf', color: '#ef4444', order_index: 5 },
+  { key: 'other', label: 'Other', extensions: '', color: '#6b7280', order_index: 6 },
 ];
 
 const DEFAULT_TEMPLATE_CHECKLIST = [
@@ -75,6 +129,89 @@ const DEFAULT_TEMPLATE_CHECKLIST = [
   'Link core parts and datasheets',
   'Save latest design or firmware files',
 ];
+
+const DEFAULT_THEME_SETTINGS = {
+  accent: '#2f6feb',
+  accent_soft: '#dbeafe',
+  surface: '#161b22',
+  surface_alt: '#21262d',
+  text: '#e1e4e8',
+  text_muted: '#8b949e',
+  bg: '#0f1117',
+  field: '#0d1117',
+  border: '#30363d',
+};
+
+const DEFAULT_CATEGORY_ROWS = [
+  { id: 1, name: "Custom PCB's", parent_id: null, order_index: 1 },
+  { id: 2, name: 'Microcontrollers & Development Boards', parent_id: null, order_index: 2 },
+  { id: 3, name: 'ESP32', parent_id: 2, order_index: 3 },
+  { id: 4, name: 'Arduino', parent_id: 2, order_index: 4 },
+  { id: 5, name: 'Modules', parent_id: null, order_index: 5 },
+  { id: 6, name: 'Displays', parent_id: 5, order_index: 6 },
+  { id: 7, name: 'Sensors', parent_id: 5, order_index: 7 },
+  { id: 8, name: 'Circuit Board Parts', parent_id: null, order_index: 8 },
+  { id: 9, name: "IC's", parent_id: 8, order_index: 9 },
+  { id: 10, name: 'LEDs', parent_id: 8, order_index: 10 },
+  { id: 11, name: 'Diodes', parent_id: 10, order_index: 11 },
+  { id: 12, name: 'LED Strings', parent_id: 10, order_index: 12 },
+  { id: 13, name: 'Resistors', parent_id: 8, order_index: 13 },
+  { id: 14, name: 'Capacitors', parent_id: 8, order_index: 14 },
+  { id: 15, name: 'Inductors', parent_id: 8, order_index: 15 },
+  { id: 16, name: 'Diodes', parent_id: 8, order_index: 16 },
+  { id: 17, name: 'Switches & Relays', parent_id: 8, order_index: 17 },
+  { id: 18, name: 'Power', parent_id: null, order_index: 18 },
+  { id: 19, name: 'Power Supplies', parent_id: 18, order_index: 19 },
+  { id: 20, name: 'Power Modules', parent_id: 18, order_index: 20 },
+  { id: 21, name: 'LED Current Supplies', parent_id: 18, order_index: 21 },
+  { id: 22, name: 'Battery', parent_id: 18, order_index: 22 },
+  { id: 23, name: 'Mechanical & Hardware', parent_id: null, order_index: 23 },
+  { id: 24, name: 'Nuts, Bolts & Screws', parent_id: 23, order_index: 24 },
+  { id: 25, name: 'Nuts', parent_id: 24, order_index: 25 },
+  { id: 26, name: 'Bolts', parent_id: 24, order_index: 26 },
+  { id: 27, name: 'Screws', parent_id: 24, order_index: 27 },
+  { id: 28, name: 'Motors & Motion', parent_id: null, order_index: 28 },
+  { id: 29, name: 'Magnets', parent_id: null, order_index: 29 },
+  { id: 30, name: 'Cooling', parent_id: null, order_index: 30 },
+  { id: 31, name: 'Sound', parent_id: null, order_index: 31 },
+  { id: 32, name: 'Optics & Physics', parent_id: null, order_index: 32 },
+  { id: 33, name: 'Connectors & Wiring', parent_id: null, order_index: 33 },
+  { id: 34, name: 'Prototyping & Tools', parent_id: null, order_index: 34 },
+  { id: 35, name: 'Miscellaneous', parent_id: null, order_index: 35 },
+  { id: 36, name: 'Tape', parent_id: 35, order_index: 36 },
+];
+
+const DEFAULT_STEP_DEFINITIONS = [
+  { name: 'Design', order_index: 10 },
+  { name: 'Schematic', order_index: 20 },
+  { name: 'PCB Layout', order_index: 30 },
+  { name: 'Parts', order_index: 40 },
+  { name: 'Assembly', order_index: 50 },
+  { name: 'Programming', order_index: 60 },
+  { name: 'Testing', order_index: 70 },
+  { name: 'Debugging', order_index: 80 },
+  { name: 'Enclosure', order_index: 90 },
+  { name: 'Documentation', order_index: 100 },
+  { name: 'Done', order_index: 110 },
+];
+
+function normalizeThemeSettings(theme) {
+  const source = theme && typeof theme === 'object' ? theme : {};
+  const normalized = {
+    ...DEFAULT_THEME_SETTINGS,
+    ...source,
+    accent_soft: source.accent_soft || source.accentSoft || DEFAULT_THEME_SETTINGS.accent_soft,
+    surface_alt: source.surface_alt || source.surfaceAlt || DEFAULT_THEME_SETTINGS.surface_alt,
+    text_muted: source.text_muted || source.textMuted || DEFAULT_THEME_SETTINGS.text_muted,
+    bg: source.bg || DEFAULT_THEME_SETTINGS.bg,
+    field: source.field || DEFAULT_THEME_SETTINGS.field,
+    border: source.border || DEFAULT_THEME_SETTINGS.border,
+  };
+  delete normalized.accentSoft;
+  delete normalized.surfaceAlt;
+  delete normalized.textMuted;
+  return normalized;
+}
 
 function normalizeExtensions(value) {
   if (!value) return [];
@@ -106,6 +243,8 @@ function normalizeFileTrackers(trackers) {
         key,
         label,
         extensions: normalizeExtensions(tracker.extensions).join(','),
+        color: tracker.color || null,
+        order_index: tracker.order_index ?? index,
       };
     })
     .filter((tracker) => tracker.label);
@@ -125,9 +264,52 @@ function parseJsonSetting(value, fallback) {
   return value;
 }
 
+function isRecord(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 async function getJsonSetting(key, fallback) {
   const { rows } = await pool.query(`SELECT value FROM app_metadata WHERE key=$1`, [key]);
   return parseJsonSetting(rows[0]?.value, fallback);
+}
+
+async function seedDefaultCategories(client) {
+  for (const row of DEFAULT_CATEGORY_ROWS) {
+    await client.query(
+      `INSERT INTO category (id, name, parent_id, order_index)
+       VALUES ($1,$2,$3,$4)`,
+      [row.id, row.name, row.parent_id, row.order_index],
+    );
+  }
+  await client.query(
+    `SELECT setval(pg_get_serial_sequence('category','id'), GREATEST(COALESCE((SELECT MAX(id) FROM category), 0), 1), true)`,
+  );
+}
+
+async function seedDefaultStepDefinitions(client) {
+  for (const row of DEFAULT_STEP_DEFINITIONS) {
+    await client.query(
+      `INSERT INTO step_definition (name, order_index) VALUES ($1,$2)`,
+      [row.name, row.order_index],
+    );
+  }
+  await client.query(
+    `SELECT setval(pg_get_serial_sequence('step_definition','id'), GREATEST(COALESCE((SELECT MAX(id) FROM step_definition), 0), 1), true)`,
+  );
+}
+
+async function resetAppToDefaults(client) {
+  for (const table of BACKUP_WIPE_ORDER) await client.query(`DELETE FROM ${table}`);
+  await client.query(`DELETE FROM app_metadata WHERE key <> 'schema_version'`);
+  [DOC_DIR, PROJECT_DIR, IMAGE_DIR, IMPORT_DIR].forEach(emptyUploadDir);
+  await seedDefaultCategories(client);
+  await seedDefaultStepDefinitions(client);
+  await setJsonSetting(client, 'theme_settings', DEFAULT_THEME_SETTINGS);
+  await setJsonSetting(client, 'template_checklist', DEFAULT_TEMPLATE_CHECKLIST);
+  await setJsonSetting(client, 'file_trackers', DEFAULT_FILE_TRACKERS);
+  for (const table of BACKUP_SEQ_TABLES) {
+    await client.query(`SELECT setval(pg_get_serial_sequence('${table}','id'), COALESCE(MAX(id),0)+1, false) FROM ${table}`);
+  }
 }
 
 async function setJsonSetting(client, key, value) {
@@ -161,13 +343,155 @@ async function getProjectTemplate() {
   };
 }
 
+function normalizePortableProjectData(value) {
+  const data = parseJsonSetting(value, {});
+  return {
+    photo_library: Array.isArray(data?.photo_library) ? data.photo_library : [],
+    instructions: isRecord(data?.instructions)
+      ? {
+        intro: String(data.instructions.intro || ''),
+        steps: Array.isArray(data.instructions.steps) ? data.instructions.steps : [],
+      }
+      : { intro: '', steps: [] },
+    desktop_export_options: isRecord(data?.desktop_export_options) ? data.desktop_export_options : {},
+    manifest_extensions: isRecord(data?.manifest_extensions) ? data.manifest_extensions : {},
+  };
+}
+
+function serializePortableProjectData(value) {
+  const data = normalizePortableProjectData(value);
+  return {
+    photo_library: data.photo_library,
+    instructions: data.instructions,
+    desktop_export_options: data.desktop_export_options,
+    manifest_extensions: data.manifest_extensions,
+  };
+}
+
+function collectRichImageRefs(html, context, refs = []) {
+  extractImagePathsFromHtml(html).forEach((imagePath, index) => {
+    refs.push({
+      image_path: imagePath,
+      archive_path: `note-images/${context}-${index + 1}-${safeZipName(imagePath)}`,
+      context,
+    });
+  });
+  return refs;
+}
+
+function rewriteImportedImageRefs(html, importedImageMap) {
+  let next = String(html || '');
+  for (const [archivePath, imported] of importedImageMap.entries()) {
+    const original = imported.originalPath;
+    if (!original || !imported.filename) continue;
+    next = next.split(`/files/images/${original}`).join(imageFileUrl(imported.filename));
+    next = next.split(imageFileUrl(original)).join(imageFileUrl(imported.filename));
+  }
+  return next;
+}
+
+function buildProjectPhotoLibraryExport(photoLibrary = []) {
+  return photoLibrary.map((folder, folderIndex) => ({
+    id: folder.id || `folder-${folderIndex + 1}`,
+    name: folder.name || `Folder ${folderIndex + 1}`,
+    order_index: folder.order_index ?? folderIndex,
+    photos: Array.isArray(folder.photos) ? folder.photos.map((photo, photoIndex) => ({
+      id: photo.id || `photo-${folderIndex + 1}-${photoIndex + 1}`,
+      name: photo.name || photo.original_filename || `Photo ${photoIndex + 1}`,
+      note: photo.note || '',
+      taken_at: photo.taken_at || null,
+      order_index: photo.order_index ?? photoIndex,
+      original_filename: photo.original_filename || photo.name || `photo-${photoIndex + 1}`,
+      original_image_path: photo.original_image_path || null,
+      original_archive_path: photo.original_image_path
+        ? `project-photos/${folder.id || `folder-${folderIndex + 1}`}/${photo.id || `photo-${photoIndex + 1}`}-original-${safeZipName(photo.original_filename || photo.name || 'photo')}`
+        : null,
+      markup_image_path: photo.markup_image_path || null,
+      markup_archive_path: photo.markup_image_path
+        ? `project-photos/${folder.id || `folder-${folderIndex + 1}`}/${photo.id || `photo-${photoIndex + 1}`}-markup-${safeZipName(photo.original_filename || photo.name || 'photo')}`
+        : null,
+      thumbnail_path: photo.thumbnail_path || null,
+    })) : [],
+  }));
+}
+
+function buildInstructionExport(instructions, photoLibrary) {
+  const photoIds = new Set(photoLibrary.flatMap((folder) => (folder.photos || []).map((photo) => String(photo.id))));
+  return {
+    intro: String(instructions?.intro || ''),
+    steps: Array.isArray(instructions?.steps) ? instructions.steps.map((step, index) => ({
+      id: step.id || `instruction-step-${index + 1}`,
+      title: step.title || step.header || `Step ${index + 1}`,
+      body: String(step.body || ''),
+      photo_id: step.photo_id && photoIds.has(String(step.photo_id)) ? String(step.photo_id) : (step.photo_id || null),
+      order_index: step.order_index ?? index,
+    })) : [],
+  };
+}
+
+function desktopWebId(prefix, id) {
+  return `${prefix}-web-${id}`;
+}
+
+function desktopWebTrackerId(key = '') {
+  return key ? `tracker-web-${key}` : 'tracker-web-other';
+}
+
+function injectDesktopPackageImageAttrs(html, mappings = []) {
+  let next = String(html || '');
+  mappings.forEach(({ imagePath, packagePath }) => {
+    if (!imagePath || !packagePath) return;
+    const source = `src="${imageFileUrl(imagePath)}"`;
+    next = next.split(source).join(`${source} data-project-image-package-path="${packagePath}"`);
+  });
+  return next;
+}
+
+async function copyRequiredZipEntry(directory, archivePath, targetDir, originalFilename, missingLabel) {
+  if (!archivePath) return null;
+  const entry = directory.files.find((file) => file.path === archivePath);
+  if (!entry) throw new Error(missingLabel || `Project export is missing ${archivePath}.`);
+  const filename = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}-${safeName(originalFilename || path.basename(archivePath))}`;
+  fs.writeFileSync(path.join(targetDir, filename), await entry.buffer());
+  return filename;
+}
+
 async function ensureRuntimeSchema() {
   await pool.query(`ALTER TABLE category ADD COLUMN IF NOT EXISTS order_index INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`ALTER TABLE project_part ADD COLUMN IF NOT EXISTS quantity INTEGER NOT NULL DEFAULT 1`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS tracker_key TEXT`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS file_type TEXT NOT NULL DEFAULT 'file'`);
   await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS version_note TEXT`);
+  await pool.query(`ALTER TABLE project_file ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
   await pool.query(`ALTER TABLE part_document ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE part_document ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await pool.query(`ALTER TABLE part ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await pool.query(`ALTER TABLE project ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await pool.query(`ALTER TABLE import_batch ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await pool.query(`ALTER TABLE import_item ADD COLUMN IF NOT EXISTS portable_data JSONB NOT NULL DEFAULT '{}'::jsonb`);
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'import_item_status_check'
+      ) THEN
+        ALTER TABLE import_item DROP CONSTRAINT import_item_status_check;
+      END IF;
+      ALTER TABLE import_item
+      ADD CONSTRAINT import_item_status_check
+      CHECK (status IN ('draft', 'imported', 'promoted', 'merged', 'skipped'));
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END $$;
+  `);
+  const theme = await getJsonSetting('theme_settings', null);
+  if (!theme) {
+    await setJsonSetting(pool, 'theme_settings', DEFAULT_THEME_SETTINGS);
+  } else {
+    await setJsonSetting(pool, 'theme_settings', normalizeThemeSettings(theme));
+  }
 }
 
 function rmUpload(dir, filename) {
@@ -1144,6 +1468,68 @@ app.get('/api/settings/project-template', asyncHandler(async (req, res) => {
   res.json(await getProjectTemplate());
 }));
 
+app.get('/api/settings/theme', asyncHandler(async (req, res) => {
+  res.json(normalizeThemeSettings(await getJsonSetting('theme_settings', DEFAULT_THEME_SETTINGS)));
+}));
+
+app.put('/api/settings/theme', asyncHandler(async (req, res) => {
+  const current = normalizeThemeSettings(await getJsonSetting('theme_settings', DEFAULT_THEME_SETTINGS));
+  const next = normalizeThemeSettings({
+    ...current,
+    ...(req.body && typeof req.body === 'object' ? req.body : {}),
+  });
+  await setJsonSetting(pool, 'theme_settings', next);
+  res.json(next);
+}));
+
+app.get('/api/settings/storage-cleanup/scan', asyncHandler(async (req, res) => {
+  res.json(await buildStorageCleanupScan());
+}));
+
+app.post('/api/settings/storage-cleanup/delete', asyncHandler(async (req, res) => {
+  const files = Array.isArray(req.body?.files) ? req.body.files : [];
+  if (!files.length) return res.status(400).json({ error: 'Select at least one orphaned file to delete.' });
+  const rootMap = {
+    documents: DOC_DIR,
+    projects: PROJECT_DIR,
+    images: IMAGE_DIR,
+    imports: IMPORT_DIR,
+  };
+  const scan = await buildStorageCleanupScan();
+  const orphanSet = new Set((scan.orphans || []).map((item) => `${item.root}:${item.path}`));
+  let deleted = 0;
+  for (const entry of files) {
+    if (!entry || typeof entry !== 'object') continue;
+    const root = String(entry.root || '');
+    const relativePath = String(entry.path || '').replace(/\\/g, '/');
+    const baseDir = rootMap[root];
+    if (!baseDir) continue;
+    if (!orphanSet.has(`${root}:${relativePath}`)) continue;
+    const target = path.resolve(baseDir, relativePath);
+    if (!target.startsWith(path.resolve(baseDir) + path.sep)) continue;
+    if (fs.existsSync(target)) {
+      fs.rmSync(target, { force: true });
+      deleted += 1;
+    }
+  }
+  res.json({ ok: true, deleted });
+}));
+
+app.post('/api/settings/reset-defaults', asyncHandler(async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await resetAppToDefaults(client);
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.put('/api/settings/project-template', asyncHandler(async (req, res) => {
   const steps = Array.isArray(req.body.steps) ? req.body.steps : [];
   const checklist = Array.isArray(req.body.default_checklist)
@@ -1224,8 +1610,8 @@ app.post('/api/projects', asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `INSERT INTO project (name, status, notes) VALUES ($1,$2,$3) RETURNING *`,
-      [name.trim(), status || 'active', notes || null],
+      `INSERT INTO project (name, status, notes, portable_data) VALUES ($1,$2,$3,$4::jsonb) RETURNING *`,
+      [name.trim(), status || 'active', notes || null, JSON.stringify(serializePortableProjectData({}))],
     );
     for (const [index, text] of (Array.isArray(checklist) ? checklist : DEFAULT_TEMPLATE_CHECKLIST).entries()) {
       const clean = String(text || '').trim();
@@ -1279,6 +1665,7 @@ app.get('/api/projects/:id', asyncHandler(async (req, res) => {
   if (!projectResult.rows[0]) return res.status(404).json({ error: 'Project not found' });
   res.json({
     ...projectResult.rows[0],
+    portable_data: normalizePortableProjectData(projectResult.rows[0].portable_data),
     parts: parts.rows,
     files: files.rows,
     checklist: checklist.rows,
@@ -1287,15 +1674,19 @@ app.get('/api/projects/:id', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/projects/:id', asyncHandler(async (req, res) => {
-  const { name, status, notes } = req.body;
+  const { name, status, notes, portable_data } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Project name is required' });
+  const { rows: currentRows } = await pool.query(`SELECT portable_data FROM project WHERE id=$1`, [req.params.id]);
+  if (!currentRows[0]) return res.status(404).json({ error: 'Project not found' });
+  const nextPortable = portable_data === undefined
+    ? currentRows[0].portable_data
+    : serializePortableProjectData(portable_data);
   const { rows } = await pool.query(
-    `UPDATE project SET name=$1, status=$2, notes=$3, updated_at=NOW()
-     WHERE id=$4 RETURNING *`,
-    [name.trim(), status || 'active', notes || null, req.params.id],
+    `UPDATE project SET name=$1, status=$2, notes=$3, portable_data=$4::jsonb, updated_at=NOW()
+     WHERE id=$5 RETURNING *`,
+    [name.trim(), status || 'active', notes || null, JSON.stringify(nextPortable), req.params.id],
   );
-  if (!rows[0]) return res.status(404).json({ error: 'Project not found' });
-  res.json(rows[0]);
+  res.json({ ...rows[0], portable_data: normalizePortableProjectData(rows[0].portable_data) });
 }));
 
 app.delete('/api/projects/:id', asyncHandler(async (req, res) => {
@@ -1308,7 +1699,7 @@ app.delete('/api/projects/:id', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
-  const [projectResult, parts, files, checklist, steps, docs, categories] = await Promise.all([
+  const [projectResult, parts, files, checklist, steps, docs, categories, template] = await Promise.all([
     pool.query(`SELECT * FROM project WHERE id=$1`, [req.params.id]),
     pool.query(
       `SELECT pp.id AS project_part_id, pp.quantity, p.*,
@@ -1341,12 +1732,19 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       [req.params.id],
     ),
     pool.query(`SELECT * FROM category ORDER BY parent_id NULLS FIRST, order_index, name`),
+    getProjectTemplate(),
   ]);
   const project = projectResult.rows[0];
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  const portableProject = normalizePortableProjectData(project.portable_data);
   const categoryPathMap = buildCategoryPathMap(categories.rows);
-  const latestFiles = files.rows.filter((file) => file.is_latest);
-  const noteImages = extractImagePathsFromHtml(project.notes);
+  const exportedFiles = files.rows;
+  const noteImages = [
+    ...collectRichImageRefs(project.notes, 'project-notes'),
+    ...collectRichImageRefs(portableProject.instructions.intro, 'instructions-intro'),
+    ...portableProject.instructions.steps.flatMap((step, index) => collectRichImageRefs(step.body, `instructions-step-${index + 1}`)),
+  ];
+  const photoLibrary = buildProjectPhotoLibraryExport(portableProject.photo_library);
   const partRows = parts.rows.map((part) => {
     const categoryPath = categoryPathMap.get(part.category_id) || [];
     return {
@@ -1365,11 +1763,25 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
           is_primary: doc.is_primary,
           uploaded_at: doc.uploaded_at,
           archive_path: doc.file_path ? `part-documents/${part.id}/${doc.id}-${safeZipName(doc.original_filename)}` : null,
+          portable_data: parseJsonSetting(doc.portable_data, {}),
         })),
     };
   });
+  const manifestExtensions = portableProject.manifest_extensions || {};
+  const instructions = buildInstructionExport(portableProject.instructions, photoLibrary);
+  const desktopProjectId = desktopWebId('project', project.id);
+  const desktopCategoryIdMap = new Map([['cat-unassigned', 'cat-unassigned']]);
+  categories.rows.forEach((category) => {
+    desktopCategoryIdMap.set(String(category.id), desktopWebId('cat', category.id));
+  });
   const manifest = {
     type: 'buildbook-web-project-export',
+    format_version: PORTABLE_FORMAT_VERSION,
+    producer: 'BuildBook_Web',
+    producer_version: APP_VERSION,
+    capabilities: PROJECT_EXPORT_CAPABILITIES,
+    required_capabilities: PROJECT_EXPORT_REQUIRED_CAPABILITIES,
+    optional_capabilities: PROJECT_EXPORT_OPTIONAL_CAPABILITIES,
     version: APP_VERSION,
     exported_at: new Date().toISOString(),
     project: {
@@ -1379,9 +1791,10 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       image_path: project.image_path,
       image_archive_path: project.image_path ? `project-image/${safeZipName(project.image_path)}` : null,
     },
-    note_images: noteImages.map((imagePath) => ({
-      image_path: imagePath,
-      archive_path: `note-images/${safeZipName(imagePath)}`,
+    note_images: noteImages.map((image) => ({
+      image_path: image.image_path,
+      archive_path: image.archive_path,
+      context: image.context,
     })),
     steps: steps.rows.map((step) => ({ name: step.name, order_index: step.order_index })),
     checklist: checklist.rows.map((item) => ({
@@ -1390,16 +1803,17 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       completed_at: item.completed_at,
       order_index: item.order_index,
     })),
-    files: latestFiles.map((file) => ({
+    files: exportedFiles.map((file) => ({
       id: file.id,
       original_filename: file.original_filename,
       file_type: file.file_type,
       tracker_key: file.tracker_key,
       file_category: file.file_category,
       version_note: file.version_note,
-      is_latest: true,
+      is_latest: !!file.is_latest,
       uploaded_at: file.uploaded_at,
       archive_path: `latest-files/${file.id}-${safeZipName(file.original_filename)}`,
+      portable_data: parseJsonSetting(file.portable_data, {}),
     })),
     parts: partRows.map((part) => ({
       name: part.name,
@@ -1413,6 +1827,204 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       image_archive_path: part.image_archive_path,
       documents: part.documents,
     })),
+    photo_library: photoLibrary,
+    instructions,
+    desktop_export_options: portableProject.desktop_export_options,
+    manifest_extensions: manifestExtensions,
+  };
+
+  const desktopNoteImages = [];
+  const desktopNoteImageMappings = [];
+  for (const [index, image] of noteImages.filter((item) => item.context === 'project-notes').entries()) {
+    const packagePath = `project/note-images/${index + 1}-${safeZipName(image.image_path)}`;
+    desktopNoteImages.push({
+      id: desktopWebId('note-img', index + 1),
+      name: image.image_path,
+      path: '',
+      packagePath,
+    });
+    desktopNoteImageMappings.push({ imagePath: image.image_path, packagePath });
+  }
+
+  const desktopInstructionIntroMappings = noteImages
+    .filter((item) => item.context === 'instructions-intro')
+    .map((image, index) => ({
+      imagePath: image.image_path,
+      packagePath: `project/instructions/intro-images/${index + 1}-${safeZipName(image.image_path)}`,
+    }));
+
+  const desktopInstructionSteps = instructions.steps.map((step, index) => {
+    const stepMappings = noteImages
+      .filter((item) => item.context === `instructions-step-${index + 1}`)
+      .map((image, imageIndex) => ({
+        imagePath: image.image_path,
+        packagePath: `project/instructions/steps/${safeZipName(step.id)}/${imageIndex + 1}-${safeZipName(image.image_path)}`,
+      }));
+    return {
+      id: step.id,
+      title: step.title,
+      body: injectDesktopPackageImageAttrs(step.body, stepMappings),
+      photoId: step.photo_id || '',
+    };
+  });
+
+  const desktopPhotoFolders = photoLibrary.map((folder) => ({
+    id: folder.id,
+    name: folder.name,
+    photos: (folder.photos || []).map((photo) => ({
+      id: photo.id,
+      name: photo.name,
+      note: photo.note || '',
+      path: '',
+      markupPath: '',
+      thumbnailPath: '',
+      markupThumbnailPath: '',
+      packagePath: photo.original_archive_path ? `project/photos/${safeZipName(folder.id)}/${safeZipName(photo.id)}-${safeZipName(photo.original_filename || photo.name || 'photo')}` : '',
+      markupPackagePath: photo.markup_archive_path ? `project/photos/${safeZipName(folder.id)}/markup-${safeZipName(photo.id)}-${safeZipName(photo.original_filename || photo.name || 'photo')}` : '',
+      thumbnailPackagePath: '',
+      markupThumbnailPackagePath: '',
+      createdAt: photo.taken_at || project.created_at || new Date().toISOString(),
+    })),
+  }));
+
+  const desktopFiles = [];
+  const desktopFolderGroups = new Map();
+  for (const file of exportedFiles) {
+    const fileTrackerId = desktopWebTrackerId(file.tracker_key || 'other');
+    const portable = parseJsonSetting(file.portable_data, {});
+    const source = path.join(PROJECT_DIR, file.file_path);
+    const folderPath = portable.folder_path || (String(file.original_filename || '').includes('/') ? path.posix.dirname(file.original_filename) : '');
+    if (!fs.existsSync(source)) continue;
+    if (folderPath && folderPath !== '.') {
+      const groupKey = [fileTrackerId, folderPath, file.version_note || '', file.is_latest ? '1' : '0', file.uploaded_at || ''].join('|');
+      let group = desktopFolderGroups.get(groupKey);
+      if (!group) {
+        group = {
+          id: desktopWebId('file-folder', file.id),
+          type: 'folder',
+          trackerId: fileTrackerId,
+          name: path.posix.basename(folderPath) || folderPath,
+          path: '',
+          sourcePath: '',
+          storageMode: 'copy',
+          latest: Boolean(file.is_latest),
+          notes: file.version_note || '',
+          createdAt: file.uploaded_at || new Date().toISOString(),
+          folderFiles: [],
+        };
+        desktopFolderGroups.set(groupKey, group);
+        desktopFiles.push(group);
+      }
+      const relativePath = String(file.original_filename || '').slice(folderPath.length + 1) || path.posix.basename(file.original_filename);
+      const packagePath = `project/files/${safeZipName(fileTrackerId)}/${safeZipName(group.id)}/${safeZipName(relativePath)}`;
+      group.folderFiles.push({
+        id: desktopWebId('file-child', file.id),
+        name: path.posix.basename(file.original_filename),
+        relativePath,
+        path: '',
+        sourcePath: '',
+        packagePath,
+      });
+    } else {
+      const packagePath = `project/files/${safeZipName(fileTrackerId)}/${file.id}-${safeZipName(file.original_filename)}`;
+      desktopFiles.push({
+        id: desktopWebId('file', file.id),
+        trackerId: fileTrackerId,
+        name: file.original_filename,
+        path: '',
+        sourcePath: '',
+        storageMode: 'copy',
+        size: 0,
+        contentHash: '',
+        latest: Boolean(file.is_latest),
+        notes: file.version_note || '',
+        createdAt: file.uploaded_at || new Date().toISOString(),
+        packagePath,
+      });
+    }
+  }
+
+  const desktopParts = partRows.map((part, index) => ({
+    id: desktopWebId('part', part.id),
+    name: part.name,
+    categoryId: part.category_id ? (desktopCategoryIdMap.get(String(part.category_id)) || 'cat-unassigned') : 'cat-unassigned',
+    categoryPath: part.category_path,
+    image: '',
+    imagePackagePath: part.image_path ? `parts/${safeZipName(part.id)}/image/${safeZipName(part.name)}${path.extname(part.image_path) || '.image'}` : '',
+    imageThumbnail: '',
+    imageThumbnailPackagePath: '',
+    productUrl: part.product_url || '',
+    storageLocation: part.storage_location || '',
+    specSummary: part.spec_summary || '',
+    notes: part.notes || '',
+    quantity: Number(part.quantity) || 1,
+    documents: (part.documents || []).map((doc) => ({
+      id: desktopWebId('doc', `${part.id}-${doc.id}`),
+      name: doc.original_filename,
+      path: '',
+      type: doc.file_type || guessFileTypeFromName(doc.original_filename),
+      storageMode: 'copy',
+      sourcePath: '',
+      createdAt: doc.uploaded_at || new Date().toISOString(),
+      packagePath: doc.archive_path ? `parts/${safeZipName(part.id)}/documents/${safeZipName(doc.id)}-${safeZipName(doc.original_filename)}` : '',
+    })),
+    createdAt: part.created_at || new Date().toISOString(),
+    updatedAt: part.updated_at || new Date().toISOString(),
+  }));
+
+  const desktopProjectManifest = {
+    kind: 'buildbook-project-package',
+    version: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    categories: [
+      { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
+      ...categories.rows.map((category, index) => ({
+        id: desktopCategoryIdMap.get(String(category.id)),
+        name: category.name,
+        parentId: category.parent_id ? desktopCategoryIdMap.get(String(category.parent_id)) || 'cat-unassigned' : null,
+        sortOrder: index + 1,
+      })),
+    ],
+    fileTrackers: (template.file_trackers || []).map((tracker, index) => ({
+      id: desktopWebTrackerId(tracker.key),
+      name: tracker.label || tracker.key || `Files ${index + 1}`,
+      extensions: tracker.extensions || '',
+      programPath: '',
+      color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
+    })),
+    project: {
+      id: desktopProjectId,
+      name: project.name,
+      status: project.status,
+      image: '',
+      imagePackagePath: project.image_path ? `project/image/${safeZipName(project.name)}${path.extname(project.image_path) || '.image'}` : '',
+      activeSteps: steps.rows
+        .slice()
+        .sort((a, b) => (a.order_index || 0) - (b.order_index || 0))
+        .map((step) => step.name),
+      notes: injectDesktopPackageImageAttrs(project.notes, desktopNoteImageMappings),
+      noteImages: desktopNoteImages,
+      checklist: checklist.rows
+        .slice()
+        .sort((a, b) => (a.order_index || 0) - (b.order_index || 0))
+        .map((item) => ({
+          id: desktopWebId('check', item.id),
+          text: item.text || '',
+          completedAt: item.is_completed ? (item.completed_at || '') : '',
+        })),
+      nextSteps: [],
+      partIds: desktopParts.map((part) => part.id),
+      partQuantities: Object.fromEntries(desktopParts.map((part) => [part.id, part.quantity])),
+      files: desktopFiles,
+      photoFolders: desktopPhotoFolders,
+      instructions: {
+        intro: injectDesktopPackageImageAttrs(instructions.intro, desktopInstructionIntroMappings),
+        steps: desktopInstructionSteps,
+      },
+      createdAt: project.created_at || new Date().toISOString(),
+      updatedAt: project.updated_at || new Date().toISOString(),
+    },
+    parts: desktopParts,
   };
 
   const summary = `<!doctype html>
@@ -1425,7 +2037,7 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
 <h2>Notes</h2><div class="box">${project.notes || '<p>No notes.</p>'}</div>
 <h2>Checklist</h2><ul>${checklist.rows.map((item) => `<li>${item.is_completed ? '[x]' : '[ ]'} ${item.text}${item.completed_at ? ` (${new Date(item.completed_at).toLocaleDateString()})` : ''}</li>`).join('') || '<li>No checklist items.</li>'}</ul>
 <h2>Linked Parts</h2>${partRows.map((part) => `<div class="box"><strong>${part.name}</strong><br><span class="muted">Qty ${part.quantity || 1} | ${part.category_label} | ${part.storage_location || 'No location'}</span>${part.product_url ? `<br><a href="${part.product_url}">${part.product_url}</a>` : ''}<pre>${part.spec_summary || ''}</pre></div>`).join('') || '<p>No linked parts.</p>'}
-<h2>Latest Files</h2><ul>${latestFiles.map((file) => `<li>${file.file_category}: ${file.original_filename}${file.version_note ? ` - ${file.version_note}` : ''}</li>`).join('') || '<li>No latest files.</li>'}</ul>
+<h2>Latest Files</h2><ul>${exportedFiles.filter((file) => file.is_latest).map((file) => `<li>${file.file_category}: ${file.original_filename}${file.version_note ? ` - ${file.version_note}` : ''}</li>`).join('') || '<li>No latest files.</li>'}</ul>
 </body></html>`;
 
   res.setHeader('Content-Type', 'application/zip');
@@ -1437,21 +2049,73 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
   archive.append(stripHtml(project.notes || ''), { name: 'notes.txt' });
   archive.append(JSON.stringify(manifest, null, 2), { name: 'project-manifest.json' });
   archive.append(JSON.stringify(manifest, null, 2), { name: 'project-data.json' });
+  archive.append(JSON.stringify(desktopProjectManifest, null, 2), { name: 'buildbook-package.json' });
 
   if (project.image_path) {
     const source = path.join(IMAGE_DIR, project.image_path);
-    if (fs.existsSync(source)) archive.file(source, { name: manifest.project.image_archive_path });
+    if (fs.existsSync(source)) {
+      archive.file(source, { name: manifest.project.image_archive_path });
+      archive.file(source, { name: desktopProjectManifest.project.imagePackagePath });
+    }
   }
   manifest.note_images.forEach((image) => {
     const source = path.join(IMAGE_DIR, image.image_path);
-    if (fs.existsSync(source)) archive.file(source, { name: image.archive_path });
+    if (fs.existsSync(source)) {
+      archive.file(source, { name: image.archive_path });
+      const projectNoteImage = desktopProjectManifest.project.noteImages.find((item) => item.name === image.image_path);
+      if (projectNoteImage?.packagePath) archive.file(source, { name: projectNoteImage.packagePath });
+      desktopInstructionIntroMappings
+        .filter((item) => item.imagePath === image.image_path)
+        .forEach((item) => archive.file(source, { name: item.packagePath }));
+      desktopInstructionSteps
+        .flatMap((step, index) => {
+          const stepMappings = noteImages
+            .filter((entry) => entry.context === `instructions-step-${index + 1}` && entry.image_path === image.image_path)
+            .map((entry, imageIndex) => ({
+              packagePath: `project/instructions/steps/${safeZipName(step.id)}/${imageIndex + 1}-${safeZipName(image.image_path)}`,
+            }));
+          return stepMappings;
+        })
+        .forEach((item) => archive.file(source, { name: item.packagePath }));
+    }
   });
-  latestFiles.forEach((file) => {
+  exportedFiles.forEach((file) => {
     const source = path.join(PROJECT_DIR, file.file_path);
     if (fs.existsSync(source)) {
       const manifestFile = manifest.files.find((item) => item.id === file.id);
       archive.file(source, { name: manifestFile.archive_path });
+      desktopFiles.forEach((desktopFile) => {
+        if (desktopFile.type === 'folder') {
+          desktopFile.folderFiles
+            .filter((child) => child.id === desktopWebId('file-child', file.id))
+            .forEach((child) => archive.file(source, { name: child.packagePath }));
+        } else if (desktopFile.id === desktopWebId('file', file.id)) {
+          archive.file(source, { name: desktopFile.packagePath });
+        }
+      });
     }
+  });
+  photoLibrary.forEach((folder) => {
+    (folder.photos || []).forEach((photo) => {
+      if (photo.original_image_path && photo.original_archive_path) {
+        const source = path.join(IMAGE_DIR, photo.original_image_path);
+        if (fs.existsSync(source)) {
+          archive.file(source, { name: photo.original_archive_path });
+          const desktopFolder = desktopPhotoFolders.find((item) => item.id === folder.id);
+          const desktopPhoto = desktopFolder?.photos?.find((item) => item.id === photo.id);
+          if (desktopPhoto?.packagePath) archive.file(source, { name: desktopPhoto.packagePath });
+        }
+      }
+      if (photo.markup_image_path && photo.markup_archive_path) {
+        const source = path.join(IMAGE_DIR, photo.markup_image_path);
+        if (fs.existsSync(source)) {
+          archive.file(source, { name: photo.markup_archive_path });
+          const desktopFolder = desktopPhotoFolders.find((item) => item.id === folder.id);
+          const desktopPhoto = desktopFolder?.photos?.find((item) => item.id === photo.id);
+          if (desktopPhoto?.markupPackagePath) archive.file(source, { name: desktopPhoto.markupPackagePath });
+        }
+      }
+    });
   });
   partRows.forEach((part) => {
     const info = [
@@ -1471,12 +2135,21 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
     archive.append(info, { name: `part-info/${safeZipName(part.name)}/part-info.txt` });
     if (part.image_path && part.image_archive_path) {
       const source = path.join(IMAGE_DIR, part.image_path);
-      if (fs.existsSync(source)) archive.file(source, { name: part.image_archive_path });
+      if (fs.existsSync(source)) {
+        archive.file(source, { name: part.image_archive_path });
+        const desktopPart = desktopParts.find((item) => item.id === desktopWebId('part', part.id));
+        if (desktopPart?.imagePackagePath) archive.file(source, { name: desktopPart.imagePackagePath });
+      }
     }
     part.documents.forEach((doc) => {
       if (!doc.file_path || !doc.archive_path) return;
       const source = path.join(DOC_DIR, doc.file_path);
-      if (fs.existsSync(source)) archive.file(source, { name: doc.archive_path });
+      if (fs.existsSync(source)) {
+        archive.file(source, { name: doc.archive_path });
+        const desktopPart = desktopParts.find((item) => item.id === desktopWebId('part', part.id));
+        const desktopDoc = desktopPart?.documents?.find((item) => item.name === doc.original_filename);
+        if (desktopDoc?.packagePath) archive.file(source, { name: desktopDoc.packagePath });
+      }
     });
   });
   await archive.finalize();
@@ -1564,13 +2237,7 @@ async function resolveImportCategory(client, part, categoryMap = {}) {
 }
 
 function rewriteImportedNoteImages(notes, noteImages, importedImageMap) {
-  let next = String(notes || '');
-  (noteImages || []).forEach((image) => {
-    const imported = importedImageMap.get(image.archive_path);
-    if (!imported) return;
-    next = next.split(`/files/images/${image.image_path}`).join(`/files/images/${imported}`);
-  });
-  return next;
+  return rewriteImportedImageRefs(notes, importedImageMap);
 }
 
 app.post('/api/projects/import/preview', uploadProjectImport.single('file'), asyncHandler(async (req, res) => {
@@ -1605,6 +2272,8 @@ app.post('/api/projects/import/preview', uploadProjectImport.single('file'), asy
       version: manifest.version,
       project: manifest.project,
       files: manifest.files || [],
+      photo_library: manifest.photo_library || [],
+      instructions: manifest.instructions || { intro: '', steps: [] },
       parts: parts.map((part) => ({
         ...part,
         existing_match: part.existing_match ? { id: part.existing_match.id, name: part.existing_match.name } : null,
@@ -1630,21 +2299,79 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const importedImageMap = new Map();
     for (const image of manifest.note_images || []) {
-      const filename = await writeZipEntry(directory, image.archive_path, IMAGE_DIR, image.image_path);
-      if (filename) importedImageMap.set(image.archive_path, filename);
+      const filename = await copyRequiredZipEntry(
+        directory,
+        image.archive_path,
+        IMAGE_DIR,
+        image.image_path,
+        `Project export is missing ${image.archive_path}.`,
+      );
+      if (filename) importedImageMap.set(image.archive_path, { filename, originalPath: image.image_path });
     }
-    const projectImage = await writeZipEntry(
+    const projectImage = await copyRequiredZipEntry(
       directory,
       manifest.project?.image_archive_path,
       IMAGE_DIR,
       manifest.project?.image_path || 'project-image',
+      manifest.project?.image_archive_path ? `Project export is missing ${manifest.project.image_archive_path}.` : null,
     );
     const projectName = await uniqueProjectImportName(client, manifest.project?.name);
     const notes = rewriteImportedNoteImages(manifest.project?.notes, manifest.note_images, importedImageMap);
+    const photoLibrary = [];
+    for (const folder of manifest.photo_library || []) {
+      const photos = [];
+      for (const photo of folder.photos || []) {
+        const originalImagePath = photo.original_archive_path
+          ? await copyRequiredZipEntry(directory, photo.original_archive_path, IMAGE_DIR, photo.original_filename || photo.name || 'photo', `Project export is missing ${photo.original_archive_path}.`)
+          : null;
+        const markupImagePath = photo.markup_archive_path
+          ? await copyRequiredZipEntry(directory, photo.markup_archive_path, IMAGE_DIR, photo.original_filename || `${photo.name || 'photo'}-markup`, `Project export is missing ${photo.markup_archive_path}.`)
+          : null;
+        photos.push({
+          ...photo,
+          original_image_path: originalImagePath,
+          markup_image_path: markupImagePath,
+          thumbnail_path: null,
+        });
+      }
+      photoLibrary.push({
+        id: folder.id,
+        name: folder.name,
+        order_index: folder.order_index ?? 0,
+        photos,
+      });
+    }
+    const instructions = {
+      intro: rewriteImportedImageRefs(manifest.instructions?.intro, importedImageMap),
+      steps: Array.isArray(manifest.instructions?.steps) ? manifest.instructions.steps.map((step, index) => ({
+        id: step.id || `instruction-step-${index + 1}`,
+        title: step.title || step.header || `Step ${index + 1}`,
+        body: rewriteImportedImageRefs(step.body, importedImageMap),
+        photo_id: step.photo_id || null,
+        order_index: step.order_index ?? index,
+      })) : [],
+    };
+    const manifestExtensions = Object.fromEntries(
+      Object.entries(manifest).filter(([key]) => ![
+        'type', 'version', 'exported_at', 'project', 'note_images', 'steps', 'checklist', 'files', 'parts',
+        'photo_library', 'instructions', 'desktop_export_options',
+      ].includes(key)),
+    );
     const { rows: [project] } = await client.query(
-      `INSERT INTO project (name, status, notes, image_path)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [projectName, manifest.project?.status || 'active', notes || null, projectImage],
+      `INSERT INTO project (name, status, notes, image_path, portable_data)
+       VALUES ($1,$2,$3,$4,$5::jsonb) RETURNING *`,
+      [
+        projectName,
+        manifest.project?.status || 'active',
+        notes || null,
+        projectImage,
+        JSON.stringify(serializePortableProjectData({
+          photo_library: photoLibrary,
+          instructions,
+          desktop_export_options: manifest.desktop_export_options || {},
+          manifest_extensions: manifestExtensions,
+        })),
+      ],
     );
 
     for (const step of manifest.steps || []) {
@@ -1671,12 +2398,28 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
     }
 
     for (const file of manifest.files || []) {
-      const filename = await writeZipEntry(directory, file.archive_path, PROJECT_DIR, file.original_filename);
-      if (!filename) continue;
+      const filename = await copyRequiredZipEntry(
+        directory,
+        file.archive_path,
+        PROJECT_DIR,
+        file.original_filename,
+        `Project export is missing files entry asset ${file.archive_path}.`,
+      );
       await client.query(
-        `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest, uploaded_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,COALESCE($8::timestamptz,NOW()))`,
-        [project.id, filename, file.original_filename, file.file_type || guessFileTypeFromName(file.original_filename), file.tracker_key || null, file.file_category || 'Imported', file.version_note || null, file.uploaded_at || null],
+        `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest, portable_data, uploaded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,COALESCE($10::timestamptz,NOW()))`,
+        [
+          project.id,
+          filename,
+          file.original_filename,
+          file.file_type || guessFileTypeFromName(file.original_filename),
+          file.tracker_key || null,
+          file.file_category || 'Imported',
+          file.version_note || null,
+          !!file.is_latest,
+          JSON.stringify(file.portable_data || {}),
+          file.uploaded_at || null,
+        ],
       );
     }
 
@@ -1684,7 +2427,9 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
       let part = await findExistingPartForImport(client, importedPart);
       if (!part) {
         const categoryId = await resolveImportCategory(client, importedPart, category_map || {});
-        const partImage = await writeZipEntry(directory, importedPart.image_archive_path, IMAGE_DIR, `${importedPart.name}-image`);
+        const partImage = importedPart.image_archive_path
+          ? await copyRequiredZipEntry(directory, importedPart.image_archive_path, IMAGE_DIR, `${importedPart.name}-image`, `Project export is missing ${importedPart.image_archive_path}.`)
+          : null;
         const { rows: [created] } = await client.query(
           `INSERT INTO part (name, category_id, product_url, storage_location, notes, spec_summary, image_path)
            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
@@ -1700,7 +2445,7 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
         );
         part = created;
       } else if (!part.image_path && importedPart.image_archive_path) {
-        const partImage = await writeZipEntry(directory, importedPart.image_archive_path, IMAGE_DIR, `${importedPart.name}-image`);
+        const partImage = await copyRequiredZipEntry(directory, importedPart.image_archive_path, IMAGE_DIR, `${importedPart.name}-image`, `Project export is missing ${importedPart.image_archive_path}.`);
         if (partImage) {
           const { rows: [updated] } = await client.query(
             `UPDATE part SET image_path=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
@@ -1723,10 +2468,10 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
           [part.id, doc.original_filename],
         );
         if (existingDoc.rows[0]) continue;
-        const docFile = await writeZipEntry(directory, doc.archive_path, DOC_DIR, doc.original_filename);
+        const docFile = await copyRequiredZipEntry(directory, doc.archive_path, DOC_DIR, doc.original_filename, `Project export is missing ${doc.archive_path}.`);
         await client.query(
-          `INSERT INTO part_document (part_id, file_type, file_path, text_content, original_filename, is_primary, uploaded_at)
-           VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7::timestamptz,NOW()))`,
+          `INSERT INTO part_document (part_id, file_type, file_path, text_content, original_filename, is_primary, portable_data, uploaded_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,COALESCE($8::timestamptz,NOW()))`,
           [
             part.id,
             doc.file_type || guessFileTypeFromName(doc.original_filename),
@@ -1734,6 +2479,7 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
             doc.text_content || null,
             doc.original_filename,
             !!doc.is_primary,
+            JSON.stringify(doc.portable_data || {}),
             doc.uploaded_at || null,
           ],
         );
@@ -1774,7 +2520,7 @@ app.post('/api/projects/:id/note-images', uploadImage.single('image'), asyncHand
   await pool.query(`UPDATE project SET updated_at=NOW() WHERE id=$1`, [req.params.id]);
   res.json({
     image_path: req.file.filename,
-    url: `/files/images/${req.file.filename}`,
+    url: imageFileUrl(req.file.filename),
   });
 }));
 
@@ -1823,22 +2569,28 @@ app.post('/api/projects/:id/files', uploadProject.array('files'), asyncHandler(a
   }
 
   const category = tracker ? trackerDisplayName(tracker) : (file_category || 'Other');
-  await pool.query(
-    `UPDATE project_file
-     SET is_latest=FALSE
-     WHERE project_id=$1 AND COALESCE(tracker_key, file_category)=COALESCE($2, $3)`,
-    [req.params.id, tracker?.key || null, category],
-  );
   const relativePaths = (() => {
     try { return JSON.parse(req.body.relative_paths || '[]'); } catch { return []; }
   })();
   const rows = [];
   for (const [index, file] of files.entries()) {
     const originalName = String(relativePaths[index] || file.originalname).replace(/\\/g, '/');
+    const folderPath = path.posix.dirname(originalName);
     const inserted = await pool.query(
-      `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE) RETURNING *`,
-      [req.params.id, file.filename, originalName, guessFileType(file), tracker?.key || null, category, version_note || null],
+      `INSERT INTO project_file (project_id, file_path, original_filename, file_type, tracker_key, file_category, version_note, is_latest, portable_data)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8::jsonb) RETURNING *`,
+      [
+        req.params.id,
+        file.filename,
+        originalName,
+        guessFileType(file),
+        tracker?.key || null,
+        category,
+        version_note || null,
+        JSON.stringify({
+          folder_path: folderPath && folderPath !== '.' ? folderPath : '',
+        }),
+      ],
     );
     rows.push(inserted.rows[0]);
   }
@@ -1875,17 +2627,6 @@ app.delete('/api/project-files/:id', asyncHandler(async (req, res) => {
 
 app.put('/api/project-files/:id/latest', asyncHandler(async (req, res) => {
   const { is_latest } = req.body;
-  if (is_latest) {
-    const { rows: current } = await pool.query(`SELECT * FROM project_file WHERE id=$1`, [req.params.id]);
-    if (current[0]) {
-      await pool.query(
-        `UPDATE project_file
-         SET is_latest=FALSE
-         WHERE project_id=$1 AND id<>$2 AND COALESCE(tracker_key, file_category)=COALESCE($3, $4)`,
-        [current[0].project_id, req.params.id, current[0].tracker_key || null, current[0].file_category],
-      );
-    }
-  }
   const { rows } = await pool.query(
     `UPDATE project_file SET is_latest=$1 WHERE id=$2 RETURNING *`,
     [!!is_latest, req.params.id],
@@ -2286,6 +3027,12 @@ async function buildBackupData() {
   };
   const data = {
     type: 'buildbook-web-backup',
+    format_version: PORTABLE_FORMAT_VERSION,
+    producer: 'BuildBook_Web',
+    producer_version: APP_VERSION,
+    capabilities: BACKUP_CAPABILITIES,
+    required_capabilities: BACKUP_REQUIRED_CAPABILITIES,
+    optional_capabilities: BACKUP_OPTIONAL_CAPABILITIES,
     version: 3,
     app_version: APP_VERSION,
     exported_at: new Date().toISOString(),
@@ -2300,6 +3047,315 @@ async function buildBackupData() {
   return data;
 }
 
+function appMetadataValue(data, key, fallback) {
+  const row = Array.isArray(data?.app_metadata) ? data.app_metadata.find((item) => item.key === key) : null;
+  return parseJsonSetting(row?.value, fallback);
+}
+
+function imageFilenameFromUrl(value = '') {
+  const match = String(value).match(/\/files\/images\/([^"')\s<>?]+)/);
+  if (!match?.[1]) return '';
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function buildDesktopProjectFilesForBackup(projectFiles = []) {
+  const desktopFiles = [];
+  const folderGroups = new Map();
+  for (const file of projectFiles) {
+    const trackerId = desktopWebTrackerId(file.tracker_key || 'other');
+    const portable = parseJsonSetting(file.portable_data, {});
+    const folderPath = portable.folder_path || (String(file.original_filename || '').includes('/') ? path.posix.dirname(file.original_filename) : '');
+    if (folderPath && folderPath !== '.') {
+      const groupKey = [trackerId, folderPath, file.version_note || '', file.is_latest ? '1' : '0', file.uploaded_at || ''].join('|');
+      let group = folderGroups.get(groupKey);
+      if (!group) {
+        group = {
+          id: desktopWebId('file-folder', file.id),
+          type: 'folder',
+          trackerId,
+          name: path.posix.basename(folderPath) || folderPath,
+          path: '',
+          sourcePath: '',
+          storageMode: 'copy',
+          latest: Boolean(file.is_latest),
+          notes: file.version_note || '',
+          createdAt: file.uploaded_at || new Date().toISOString(),
+          folderFiles: [],
+        };
+        folderGroups.set(groupKey, group);
+        desktopFiles.push(group);
+      }
+      const relativePath = String(file.original_filename || '').slice(folderPath.length + 1) || path.posix.basename(file.original_filename || '');
+      group.folderFiles.push({
+        id: desktopWebId('file-child', file.id),
+        name: path.posix.basename(file.original_filename || relativePath),
+        relativePath,
+        path: '',
+        sourcePath: '',
+        packagePath: `projects/${safeZipName(file.project_id)}/files/${safeZipName(trackerId)}/${safeZipName(group.id)}/${safeZipName(relativePath)}`,
+      });
+      continue;
+    }
+    desktopFiles.push({
+      id: desktopWebId('file', file.id),
+      trackerId,
+      name: file.original_filename || 'File',
+      path: '',
+      sourcePath: '',
+      storageMode: 'copy',
+      size: 0,
+      contentHash: '',
+      latest: Boolean(file.is_latest),
+      notes: file.version_note || '',
+      createdAt: file.uploaded_at || new Date().toISOString(),
+      packagePath: `projects/${safeZipName(file.project_id)}/files/${safeZipName(trackerId)}/${safeZipName(file.id)}-${safeZipName(file.original_filename || 'file')}`,
+    });
+  }
+  return desktopFiles;
+}
+
+function buildDesktopBackupManifest(data) {
+  const categories = Array.isArray(data.category) ? data.category : [];
+  const parts = Array.isArray(data.part) ? data.part : [];
+  const partDocuments = Array.isArray(data.part_document) ? data.part_document : [];
+  const projects = Array.isArray(data.project) ? data.project : [];
+  const projectParts = Array.isArray(data.project_part) ? data.project_part : [];
+  const projectFiles = Array.isArray(data.project_file) ? data.project_file : [];
+  const checklistItems = Array.isArray(data.project_checklist_item) ? data.project_checklist_item : [];
+  const stepDefinitions = Array.isArray(data.step_definition) ? data.step_definition : [];
+  const projectSteps = Array.isArray(data.project_step) ? data.project_step : [];
+  const importBatches = Array.isArray(data.import_batch) ? data.import_batch : [];
+  const importItems = Array.isArray(data.import_item) ? data.import_item : [];
+  const categoryPathMap = buildCategoryPathMap(categories);
+  const desktopCategoryIdMap = new Map(categories.map((category) => [String(category.id), desktopWebId('cat', category.id)]));
+  const docsByPartId = new Map();
+  const partsByProjectId = new Map();
+  const filesByProjectId = new Map();
+  const checklistByProjectId = new Map();
+  const stepNamesById = new Map(stepDefinitions.map((step) => [step.id, step.name]));
+  const stepsByProjectId = new Map();
+  const itemsByBatchId = new Map();
+
+  for (const row of partDocuments) {
+    const bucket = docsByPartId.get(row.part_id) || [];
+    bucket.push(row);
+    docsByPartId.set(row.part_id, bucket);
+  }
+  for (const row of projectParts) {
+    const bucket = partsByProjectId.get(row.project_id) || [];
+    bucket.push(row);
+    partsByProjectId.set(row.project_id, bucket);
+  }
+  for (const row of projectFiles) {
+    const bucket = filesByProjectId.get(row.project_id) || [];
+    bucket.push(row);
+    filesByProjectId.set(row.project_id, bucket);
+  }
+  for (const row of checklistItems) {
+    const bucket = checklistByProjectId.get(row.project_id) || [];
+    bucket.push(row);
+    checklistByProjectId.set(row.project_id, bucket);
+  }
+  for (const row of projectSteps) {
+    const bucket = stepsByProjectId.get(row.project_id) || [];
+    bucket.push(row);
+    stepsByProjectId.set(row.project_id, bucket);
+  }
+  for (const row of importItems) {
+    const bucket = itemsByBatchId.get(row.import_batch_id) || [];
+    bucket.push(row);
+    itemsByBatchId.set(row.import_batch_id, bucket);
+  }
+
+  const desktopParts = parts.map((part) => {
+    const portable = parseJsonSetting(part.portable_data, {});
+    const documents = (docsByPartId.get(part.id) || []).map((doc) => ({
+      id: desktopWebId('doc', doc.id),
+      name: doc.original_filename || 'Document',
+      path: '',
+      type: doc.file_type || guessFileTypeFromName(doc.original_filename),
+      storageMode: 'copy',
+      sourcePath: '',
+      textContent: doc.text_content || '',
+      isPrimary: Boolean(doc.is_primary),
+      createdAt: doc.uploaded_at || new Date().toISOString(),
+      packagePath: doc.file_path ? `parts/${safeZipName(part.id)}/documents/${safeZipName(doc.id)}-${safeZipName(doc.original_filename || 'document')}` : '',
+    }));
+    return {
+      id: desktopWebId('part', part.id),
+      name: part.name,
+      categoryId: part.category_id ? desktopCategoryIdMap.get(String(part.category_id)) || 'cat-unassigned' : 'cat-unassigned',
+      image: '',
+      imagePackagePath: part.image_path ? `parts/${safeZipName(part.id)}/image/${safeZipName(part.name)}${path.extname(part.image_path) || '.image'}` : '',
+      imageThumbnail: '',
+      imageThumbnailPackagePath: portable.image_thumbnail_path ? `parts/${safeZipName(part.id)}/image/thumb-${safeZipName(part.name)}${path.extname(portable.image_thumbnail_path) || '.jpg'}` : '',
+      productUrl: part.product_url || '',
+      storageLocation: part.storage_location || '',
+      specSummary: part.spec_summary || '',
+      notes: part.notes || '',
+      documents,
+      createdAt: part.created_at || new Date().toISOString(),
+      updatedAt: part.updated_at || new Date().toISOString(),
+    };
+  });
+  const desktopPartByDbId = new Map(parts.map((part, index) => [part.id, desktopParts[index]]));
+
+  const desktopProjects = projects.map((project) => {
+    const portable = normalizePortableProjectData(project.portable_data);
+    const projectStepNames = (stepsByProjectId.get(project.id) || [])
+      .map((row) => stepNamesById.get(row.step_definition_id))
+      .filter(Boolean);
+    const projectChecklist = (checklistByProjectId.get(project.id) || [])
+      .slice()
+      .sort((a, b) => (a.order_index || 0) - (b.order_index || 0))
+      .map((item) => ({
+        id: desktopWebId('check', item.id),
+        text: item.text || '',
+        completedAt: item.is_completed ? (item.completed_at || '') : '',
+      }));
+    const noteImages = collectRichImageRefs(project.notes, 'project-notes').map((image, index) => ({
+      id: desktopWebId('note-image', `${project.id}-${index + 1}`),
+      name: image.image_path,
+      path: '',
+      packagePath: `projects/${safeZipName(project.id)}/note-images/${index + 1}-${safeZipName(image.image_path)}`,
+    }));
+    const noteImageMappings = noteImages.map((image) => ({ imagePath: image.name, packagePath: image.packagePath }));
+    const instructionIntroMappings = collectRichImageRefs(portable.instructions.intro, 'instructions-intro')
+      .map((image, index) => ({ imagePath: image.image_path, packagePath: `projects/${safeZipName(project.id)}/instructions/intro-images/${index + 1}-${safeZipName(image.image_path)}` }));
+    const instructionSteps = (portable.instructions.steps || []).map((step, index) => {
+      const bodyMappings = collectRichImageRefs(step.body, `instructions-step-${index + 1}`)
+        .map((image, imageIndex) => ({ imagePath: image.image_path, packagePath: `projects/${safeZipName(project.id)}/instructions/steps/${safeZipName(step.id || `step-${index + 1}`)}/${imageIndex + 1}-${safeZipName(image.image_path)}` }));
+      return {
+        id: step.id || `step-${index + 1}`,
+        title: step.title || `Step ${index + 1}`,
+        body: injectDesktopPackageImageAttrs(step.body, bodyMappings),
+        photoId: step.photo_id || '',
+      };
+    });
+    const photoFolders = (portable.photo_library || []).map((folder, folderIndex) => ({
+      id: folder.id || `folder-${folderIndex + 1}`,
+      name: folder.name || 'Photos',
+      photos: (folder.photos || []).map((photo, photoIndex) => ({
+        id: photo.id || `photo-${photoIndex + 1}`,
+        name: photo.name || 'Photo',
+        note: photo.note || '',
+        createdAt: photo.taken_at || project.created_at || new Date().toISOString(),
+        path: '',
+        markupPath: '',
+        thumbnailPath: '',
+        markupThumbnailPath: '',
+        packagePath: photo.original_image_path ? `projects/${safeZipName(project.id)}/photos/${safeZipName(folder.id || `folder-${folderIndex + 1}`)}/${safeZipName(photo.id || `photo-${photoIndex + 1}`)}-${safeZipName(photo.original_filename || photo.name || 'photo')}` : '',
+        markupPackagePath: photo.markup_image_path ? `projects/${safeZipName(project.id)}/photos/${safeZipName(folder.id || `folder-${folderIndex + 1}`)}/markup-${safeZipName(photo.id || `photo-${photoIndex + 1}`)}-${safeZipName(photo.original_filename || photo.name || 'photo')}` : '',
+        thumbnailPackagePath: photo.thumbnail_path ? `projects/${safeZipName(project.id)}/photos/${safeZipName(folder.id || `folder-${folderIndex + 1}`)}/thumb-${safeZipName(photo.id || `photo-${photoIndex + 1}`)}.jpg` : '',
+        markupThumbnailPackagePath: photo.markup_thumbnail_path ? `projects/${safeZipName(project.id)}/photos/${safeZipName(folder.id || `folder-${folderIndex + 1}`)}/markup-thumb-${safeZipName(photo.id || `photo-${photoIndex + 1}`)}.jpg` : '',
+      })),
+    }));
+    const links = partsByProjectId.get(project.id) || [];
+    const linkedDesktopParts = links
+      .map((link) => desktopPartByDbId.get(link.part_id))
+      .filter(Boolean);
+    return {
+      id: desktopWebId('project', project.id),
+      name: project.name,
+      status: project.status || 'active',
+      image: '',
+      imagePackagePath: project.image_path ? `projects/${safeZipName(project.id)}/image/${safeZipName(project.name)}${path.extname(project.image_path) || '.image'}` : '',
+      activeSteps: projectStepNames,
+      notes: injectDesktopPackageImageAttrs(project.notes, noteImageMappings),
+      noteImages,
+      checklist: projectChecklist,
+      nextSteps: [],
+      partIds: linkedDesktopParts.map((part) => part.id),
+      partQuantities: Object.fromEntries(
+        links
+          .map((link) => [desktopPartByDbId.get(link.part_id)?.id, Number(link.quantity) || 1])
+          .filter(([partId]) => !!partId),
+      ),
+      photoFolders,
+      instructions: {
+        intro: injectDesktopPackageImageAttrs(portable.instructions.intro, instructionIntroMappings),
+        steps: instructionSteps,
+      },
+      files: buildDesktopProjectFilesForBackup((filesByProjectId.get(project.id) || []).slice().sort((a, b) => new Date(a.uploaded_at || 0) - new Date(b.uploaded_at || 0) || a.id - b.id)),
+      createdAt: project.created_at || new Date().toISOString(),
+      updatedAt: project.updated_at || new Date().toISOString(),
+    };
+  });
+
+  const desktopImportBatches = importBatches.map((batch) => ({
+    id: desktopWebId('batch', batch.id),
+    name: batch.original_filename || `Import ${batch.id}`,
+    fileName: batch.original_filename || '',
+    source: batch.source || 'web backup',
+    createdAt: batch.imported_at || new Date().toISOString(),
+    items: (itemsByBatchId.get(batch.id) || []).map((item) => {
+      const portable = parseJsonSetting(item.portable_data, {});
+      const localImagePath = imageFilenameFromUrl(item.product_image_url || '') || portable.image_path || '';
+      return {
+        id: desktopWebId('import-item', item.id),
+        name: item.raw_name || 'Imported Part',
+        raw: { name: item.raw_name || 'Imported Part' },
+        productUrl: item.product_url || '',
+        imageUrl: item.product_image_url || '',
+        imagePath: '',
+        imagePackagePath: localImagePath ? `imports/${safeZipName(batch.id)}/images/${safeZipName(item.id)}${path.extname(localImagePath) || '.image'}` : '',
+        attributes: item.attributes || '',
+        store: item.store || '',
+        orderedAt: item.ordered_at || '',
+        status: item.status || 'draft',
+        suggestedPartId: item.suggested_part_id ? desktopWebId('part', item.suggested_part_id) : '',
+        resolvedPartId: item.resolved_part_id ? desktopWebId('part', item.resolved_part_id) : '',
+      };
+    }),
+  }));
+
+  return {
+    kind: 'buildbook-full-backup',
+    version: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    state: {
+      version: APP_VERSION,
+      theme: appMetadataValue(data, 'theme_settings', DEFAULT_THEME_SETTINGS),
+      categories: [
+        { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
+        ...categories
+          .slice()
+          .sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || String(a.name || '').localeCompare(String(b.name || '')))
+          .map((category, index) => ({
+            id: desktopCategoryIdMap.get(String(category.id)),
+            name: category.name || 'Category',
+            parentId: category.parent_id ? desktopCategoryIdMap.get(String(category.parent_id)) || 'cat-unassigned' : null,
+            sortOrder: index + 1,
+            path: categoryPathMap.get(category.id) || [category.name],
+          })),
+      ],
+      template: {
+        steps: stepDefinitions
+          .slice()
+          .sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || String(a.name || '').localeCompare(String(b.name || '')))
+          .map((step) => step.name)
+          .filter(Boolean),
+        checklist: appMetadataValue(data, 'template_checklist', DEFAULT_TEMPLATE_CHECKLIST),
+        fileTrackers: normalizeFileTrackers(appMetadataValue(data, 'file_trackers', DEFAULT_FILE_TRACKERS)).map((tracker, index) => ({
+          id: desktopWebTrackerId(tracker.key),
+          name: tracker.label || tracker.key || `Files ${index + 1}`,
+          extensions: tracker.extensions || '',
+          viewer: '',
+          programPath: '',
+          color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
+        })),
+      },
+      projects: desktopProjects,
+      parts: desktopParts,
+      importBatches: desktopImportBatches,
+    },
+  };
+}
+
 function addUploadDirToArchive(archive, dir, archiveRoot) {
   if (!fs.existsSync(dir)) return;
   fs.readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
@@ -2308,6 +3364,102 @@ function addUploadDirToArchive(archive, dir, archiveRoot) {
     if (entry.isDirectory()) addUploadDirToArchive(archive, source, archivePath);
     else if (entry.isFile()) archive.file(source, { name: archivePath });
   });
+}
+
+function listFilesRecursive(rootDir, prefix = '') {
+  if (!fs.existsSync(rootDir)) return [];
+  const results = [];
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const source = path.join(rootDir, entry.name);
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      results.push(...listFilesRecursive(source, relative));
+    } else if (entry.isFile()) {
+      results.push(relative.replace(/\\/g, '/'));
+    }
+  }
+  return results;
+}
+
+function collectReferencedProjectImagePaths(project) {
+  const refs = new Set(extractImagePathsFromHtml(project.notes));
+  const portable = normalizePortableProjectData(project.portable_data);
+  extractImagePathsFromHtml(portable.instructions.intro).forEach((value) => refs.add(value));
+  for (const step of portable.instructions.steps || []) {
+    extractImagePathsFromHtml(step.body).forEach((value) => refs.add(value));
+  }
+  for (const folder of portable.photo_library || []) {
+    for (const photo of folder.photos || []) {
+      if (photo.original_image_path) refs.add(photo.original_image_path);
+      if (photo.markup_image_path) refs.add(photo.markup_image_path);
+      if (photo.thumbnail_path) refs.add(photo.thumbnail_path);
+    }
+  }
+  return refs;
+}
+
+async function collectReferencedUploadPaths() {
+  const referenced = {
+    documents: new Set(),
+    projects: new Set(),
+    images: new Set(),
+    imports: new Set(),
+  };
+  const [
+    categoriesResult,
+    partsResult,
+    partDocsResult,
+    projectsResult,
+    projectFilesResult,
+    importItemsResult,
+  ] = await Promise.all([
+    pool.query(`SELECT image_path FROM category WHERE image_path IS NOT NULL`),
+    pool.query(`SELECT image_path FROM part WHERE image_path IS NOT NULL`),
+    pool.query(`SELECT file_path FROM part_document WHERE file_path IS NOT NULL`),
+    pool.query(`SELECT image_path, notes, portable_data FROM project`),
+    pool.query(`SELECT file_path FROM project_file WHERE file_path IS NOT NULL`),
+    pool.query(`SELECT product_image_url, portable_data FROM import_item`),
+  ]);
+
+  categoriesResult.rows.forEach((row) => row.image_path && referenced.images.add(row.image_path));
+  partsResult.rows.forEach((row) => row.image_path && referenced.images.add(row.image_path));
+  partDocsResult.rows.forEach((row) => row.file_path && referenced.documents.add(row.file_path));
+  projectFilesResult.rows.forEach((row) => row.file_path && referenced.projects.add(row.file_path));
+  projectsResult.rows.forEach((row) => {
+    if (row.image_path) referenced.images.add(row.image_path);
+    collectReferencedProjectImagePaths(row).forEach((value) => referenced.images.add(value));
+  });
+  importItemsResult.rows.forEach((row) => {
+    const imagePath = imageFilenameFromUrl(row.product_image_url || '') || parseJsonSetting(row.portable_data, {})?.image_path;
+    if (imagePath) referenced.images.add(imagePath);
+  });
+
+  return referenced;
+}
+
+async function buildStorageCleanupScan() {
+  const referenced = await collectReferencedUploadPaths();
+  const actual = {
+    documents: listFilesRecursive(DOC_DIR),
+    projects: listFilesRecursive(PROJECT_DIR),
+    images: listFilesRecursive(IMAGE_DIR),
+    imports: listFilesRecursive(IMPORT_DIR),
+  };
+  const roots = ['documents', 'projects', 'images', 'imports'];
+  const orphans = [];
+  for (const root of roots) {
+    for (const relativePath of actual[root]) {
+      if (!referenced[root].has(relativePath)) {
+        orphans.push({ root, path: relativePath, full_path: `uploads/${root}/${relativePath}` });
+      }
+    }
+  }
+  return {
+    referenced_counts: Object.fromEntries(roots.map((root) => [root, referenced[root].size])),
+    actual_counts: Object.fromEntries(roots.map((root) => [root, actual[root].length])),
+    orphan_count: orphans.length,
+    orphans: orphans.sort((a, b) => a.full_path.localeCompare(b.full_path)),
+  };
 }
 
 function emptyUploadDir(dir) {
@@ -2339,7 +3491,12 @@ async function restoreBackupData(client, data) {
 
   if (Array.isArray(data.app_metadata)) {
     for (const row of data.app_metadata) {
-      await setJsonSetting(client, row.key, row.value);
+      await client.query(
+        `INSERT INTO app_metadata (key, value, updated_at)
+         VALUES ($1,$2,COALESCE($3::timestamptz,NOW()))
+         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
+        [row.key, row.value, row.updated_at || null],
+      );
     }
   }
   for (const table of BACKUP_WIPE_ORDER.slice().reverse()) await insertRows(table, data[table]);
@@ -2367,40 +3524,376 @@ function restoreUploadsFromZip(directory) {
     }));
 }
 
+function desktopTrackerKeyFromId(trackerId = '', fallbackName = '') {
+  if (String(trackerId).startsWith('tracker-web-')) return String(trackerId).replace(/^tracker-web-/, '') || 'other';
+  const known = {
+    'tracker-datasheets': 'datasheet',
+    'tracker-firmware': 'firmware',
+    'tracker-drawings': 'drawing',
+    'tracker-models': 'enclosure',
+    'tracker-bom': 'bom',
+  };
+  return known[trackerId] || slugifyKey(fallbackName || trackerId, 'other');
+}
+
+async function restoreDesktopInlineImages(directory, html, libraryKey = 'project-inline') {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-package-path="([^"]+)"[^>]*>/g)];
+  for (const match of matches) {
+    const packagePath = match[1];
+    const restored = await copyRequiredZipEntry(
+      directory,
+      packagePath,
+      IMAGE_DIR,
+      path.basename(packagePath),
+      `Desktop backup is missing ${packagePath}.`,
+    );
+    const originalTag = match[0];
+    const sourceAttr = /src="[^"]*"/.test(originalTag)
+      ? originalTag.replace(/src="[^"]*"/, `src="${imageFileUrl(restored)}"`)
+      : originalTag.replace(/<img\b/, `<img src="${imageFileUrl(restored)}"`);
+    const cleanedTag = sourceAttr
+      .replace(/\sdata-project-image-package-path="[^"]*"/g, '')
+      .replace(/\sdata-project-image-path="[^"]*"/g, '')
+      .replace(/<img\b/, `<img data-project-image-path="${restored}"`);
+    nextHtml = nextHtml.replace(originalTag, cleanedTag);
+  }
+  return nextHtml;
+}
+
+async function mergeDesktopBackupPortableState(client, directory, state) {
+  if (!state || typeof state !== 'object') return;
+  if (state.theme && typeof state.theme === 'object') {
+    await setJsonSetting(client, 'theme_settings', state.theme);
+  }
+  if (state.template?.checklist) {
+    await setJsonSetting(client, 'template_checklist', state.template.checklist);
+  }
+  if (Array.isArray(state.template?.fileTrackers)) {
+    await setJsonSetting(client, 'file_trackers', state.template.fileTrackers.map((tracker, index) => ({
+      key: desktopTrackerKeyFromId(tracker.id, tracker.name),
+      label: tracker.name || `Files ${index + 1}`,
+      extensions: tracker.extensions || '',
+      color: tracker.color || null,
+      order_index: index,
+    })));
+  }
+
+  const projectRows = await client.query(`SELECT id, name, portable_data FROM project ORDER BY id`);
+  const projectByName = new Map(projectRows.rows.map((row) => [String(row.name || '').toLowerCase(), row]));
+  const fileRows = await client.query(`SELECT id, project_id, original_filename, tracker_key, uploaded_at FROM project_file ORDER BY id`);
+
+  for (const projectState of Array.isArray(state.projects) ? state.projects : []) {
+    const projectRow = projectByName.get(String(projectState.name || '').toLowerCase());
+    if (!projectRow) continue;
+    const currentPortable = normalizePortableProjectData(projectRow.portable_data);
+
+    const photoLibrary = [];
+    for (const folder of projectState.photoFolders || []) {
+      const photos = [];
+      for (const photo of folder.photos || []) {
+        const originalImagePath = photo.packagePath
+          ? await copyRequiredZipEntry(directory, photo.packagePath, IMAGE_DIR, photo.name || path.basename(photo.packagePath), `Desktop backup is missing ${photo.packagePath}.`)
+          : '';
+        const markupImagePath = photo.markupPackagePath
+          ? await copyRequiredZipEntry(directory, photo.markupPackagePath, IMAGE_DIR, `markup-${photo.name || path.basename(photo.markupPackagePath)}`, `Desktop backup is missing ${photo.markupPackagePath}.`)
+          : '';
+        const thumbnailPath = photo.thumbnailPackagePath
+          ? await copyRequiredZipEntry(directory, photo.thumbnailPackagePath, IMAGE_DIR, `thumb-${photo.name || path.basename(photo.thumbnailPackagePath)}`, `Desktop backup is missing ${photo.thumbnailPackagePath}.`)
+          : '';
+        const markupThumbnailPath = photo.markupThumbnailPackagePath
+          ? await copyRequiredZipEntry(directory, photo.markupThumbnailPackagePath, IMAGE_DIR, `markup-thumb-${photo.name || path.basename(photo.markupThumbnailPackagePath)}`, `Desktop backup is missing ${photo.markupThumbnailPackagePath}.`)
+          : '';
+        photos.push({
+          id: photo.id,
+          name: photo.name || 'Photo',
+          note: photo.note || '',
+          taken_at: photo.createdAt || null,
+          order_index: photos.length,
+          original_filename: photo.name || path.basename(photo.packagePath || photo.markupPackagePath || 'photo'),
+          original_image_path: originalImagePath || '',
+          markup_image_path: markupImagePath || '',
+          thumbnail_path: thumbnailPath || '',
+          markup_thumbnail_path: markupThumbnailPath || '',
+        });
+      }
+      photoLibrary.push({
+        id: folder.id,
+        name: folder.name || 'Photos',
+        order_index: photoLibrary.length,
+        photos,
+      });
+    }
+
+    const instructions = projectState.instructions && typeof projectState.instructions === 'object'
+      ? {
+        intro: await restoreDesktopInlineImages(directory, projectState.instructions.intro, `project-instructions-${projectRow.id}-intro`),
+        steps: await Promise.all((projectState.instructions.steps || []).map(async (step, index) => ({
+          id: step.id || `instruction-step-${index + 1}`,
+          title: step.title || `Step ${index + 1}`,
+          body: await restoreDesktopInlineImages(directory, step.body, `project-instructions-${projectRow.id}-${step.id || index + 1}`),
+          photo_id: step.photoId || step.photo_id || '',
+          order_index: index,
+        }))),
+      }
+      : currentPortable.instructions;
+
+    await client.query(
+      `UPDATE project SET portable_data=$1::jsonb, updated_at=NOW() WHERE id=$2`,
+      [JSON.stringify(serializePortableProjectData({
+        ...currentPortable,
+        photo_library: photoLibrary.length ? photoLibrary : currentPortable.photo_library,
+        instructions,
+      })), projectRow.id],
+    );
+
+    const projectFiles = (Array.isArray(projectState.files) ? projectState.files : []);
+    for (const file of projectFiles) {
+      const trackerKey = desktopTrackerKeyFromId(file.trackerId, '');
+      if (file.type === 'folder') {
+        for (const child of file.folderFiles || []) {
+          const match = fileRows.rows.find((row) => (
+            row.project_id === projectRow.id
+            && String(row.original_filename || '') === String(child.relativePath || child.name || '')
+            && String(row.tracker_key || '') === String(trackerKey || '')
+          ));
+          if (match) {
+            await client.query(
+              `UPDATE project_file SET portable_data=$1::jsonb WHERE id=$2`,
+              [JSON.stringify({ folder_path: file.name || '' }), match.id],
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const partRows = await client.query(`SELECT id, name, portable_data FROM part ORDER BY id`);
+  const partByName = new Map(partRows.rows.map((row) => [String(row.name || '').toLowerCase(), row]));
+  for (const partState of Array.isArray(state.parts) ? state.parts : []) {
+    if (!partState?.imageThumbnailPackagePath) continue;
+    const partRow = partByName.get(String(partState.name || '').toLowerCase());
+    if (!partRow) continue;
+    const currentPortable = parseJsonSetting(partRow.portable_data, {});
+    const thumbnailPath = await copyRequiredZipEntry(
+      directory,
+      partState.imageThumbnailPackagePath,
+      IMAGE_DIR,
+      `thumb-${partState.name || path.basename(partState.imageThumbnailPackagePath)}`,
+      `Desktop backup is missing ${partState.imageThumbnailPackagePath}.`,
+    );
+    await client.query(
+      `UPDATE part SET portable_data=$1::jsonb, updated_at=NOW() WHERE id=$2`,
+      [JSON.stringify({ ...currentPortable, image_thumbnail_path: thumbnailPath || currentPortable.image_thumbnail_path || '' }), partRow.id],
+    );
+  }
+}
+
+function archiveDesktopBackupAssets(archive, data, desktopManifest) {
+  const projectsById = new Map((Array.isArray(data.project) ? data.project : []).map((row) => [row.id, row]));
+  const partsById = new Map((Array.isArray(data.part) ? data.part : []).map((row) => [row.id, row]));
+  const projectFilesByProjectId = new Map();
+  const partDocsByPartId = new Map();
+  const importItemsByBatchId = new Map();
+
+  for (const row of Array.isArray(data.project_file) ? data.project_file : []) {
+    const bucket = projectFilesByProjectId.get(row.project_id) || [];
+    bucket.push(row);
+    projectFilesByProjectId.set(row.project_id, bucket);
+  }
+  for (const row of Array.isArray(data.part_document) ? data.part_document : []) {
+    const bucket = partDocsByPartId.get(row.part_id) || [];
+    bucket.push(row);
+    partDocsByPartId.set(row.part_id, bucket);
+  }
+  for (const row of Array.isArray(data.import_item) ? data.import_item : []) {
+    const bucket = importItemsByBatchId.get(row.import_batch_id) || [];
+    bucket.push(row);
+    importItemsByBatchId.set(row.import_batch_id, bucket);
+  }
+
+  for (const project of desktopManifest.state.projects || []) {
+    const projectId = Number(String(project.id || '').replace(/^project-web-/, ''));
+    const projectRow = projectsById.get(projectId);
+    if (!projectRow) continue;
+    if (projectRow.image_path && project.imagePackagePath) {
+      const source = path.join(IMAGE_DIR, projectRow.image_path);
+      if (fs.existsSync(source)) archive.file(source, { name: project.imagePackagePath });
+    }
+
+    for (const image of project.noteImages || []) {
+      const sourceName = imageFilenameFromUrl(image.name ? `/files/images/${image.name}` : '') || image.name;
+      const source = sourceName ? path.join(IMAGE_DIR, sourceName) : '';
+      if (source && fs.existsSync(source) && image.packagePath) archive.file(source, { name: image.packagePath });
+    }
+
+    const portable = normalizePortableProjectData(projectRow.portable_data);
+    for (const image of collectRichImageRefs(portable.instructions.intro, 'instructions-intro')) {
+      const source = path.join(IMAGE_DIR, image.image_path);
+      const mapping = collectRichImageRefs(portable.instructions.intro, 'instructions-intro')
+        .findIndex((item) => item.image_path === image.image_path);
+      const packagePath = `projects/${safeZipName(projectId)}/instructions/intro-images/${mapping + 1}-${safeZipName(image.image_path)}`;
+      if (fs.existsSync(source)) archive.file(source, { name: packagePath });
+    }
+    for (const [stepIndex, step] of (portable.instructions.steps || []).entries()) {
+      const stepId = step.id || `step-${stepIndex + 1}`;
+      const refs = collectRichImageRefs(step.body, `instructions-step-${stepIndex + 1}`);
+      refs.forEach((image, imageIndex) => {
+        const source = path.join(IMAGE_DIR, image.image_path);
+        const packagePath = `projects/${safeZipName(projectId)}/instructions/steps/${safeZipName(stepId)}/${imageIndex + 1}-${safeZipName(image.image_path)}`;
+        if (fs.existsSync(source)) archive.file(source, { name: packagePath });
+      });
+    }
+
+    for (const folder of project.photoFolders || []) {
+      for (const photo of folder.photos || []) {
+        if (photo.packagePath) {
+          const sourceName = portable.photo_library
+            .flatMap((item) => item.photos || [])
+            .find((item) => item.id === photo.id)?.original_image_path;
+          const source = sourceName ? path.join(IMAGE_DIR, sourceName) : '';
+          if (source && fs.existsSync(source)) archive.file(source, { name: photo.packagePath });
+        }
+        if (photo.markupPackagePath) {
+          const sourceName = portable.photo_library
+            .flatMap((item) => item.photos || [])
+            .find((item) => item.id === photo.id)?.markup_image_path;
+          const source = sourceName ? path.join(IMAGE_DIR, sourceName) : '';
+          if (source && fs.existsSync(source)) archive.file(source, { name: photo.markupPackagePath });
+        }
+        if (photo.thumbnailPackagePath) {
+          const sourceName = portable.photo_library
+            .flatMap((item) => item.photos || [])
+            .find((item) => item.id === photo.id)?.thumbnail_path;
+          const source = sourceName ? path.join(IMAGE_DIR, sourceName) : '';
+          if (source && fs.existsSync(source)) archive.file(source, { name: photo.thumbnailPackagePath });
+        }
+        if (photo.markupThumbnailPackagePath) {
+          const sourceName = portable.photo_library
+            .flatMap((item) => item.photos || [])
+            .find((item) => item.id === photo.id)?.markup_thumbnail_path;
+          const source = sourceName ? path.join(IMAGE_DIR, sourceName) : '';
+          if (source && fs.existsSync(source)) archive.file(source, { name: photo.markupThumbnailPackagePath });
+        }
+      }
+    }
+
+    const dbFiles = projectFilesByProjectId.get(projectId) || [];
+    const desktopFiles = Array.isArray(project.files) ? project.files : [];
+    for (const file of desktopFiles) {
+      const trackerKey = desktopTrackerKeyFromId(file.trackerId, '');
+      if (file.type === 'folder') {
+        for (const child of file.folderFiles || []) {
+          const match = dbFiles.find((row) => (
+            String(row.tracker_key || '') === String(trackerKey || '')
+            && String(row.original_filename || '') === String(child.relativePath || child.name || '')
+          ));
+          if (!match?.file_path || !child.packagePath) continue;
+          const source = path.join(PROJECT_DIR, match.file_path);
+          if (fs.existsSync(source)) archive.file(source, { name: child.packagePath });
+        }
+      } else {
+        const matchId = Number(String(file.id || '').replace(/^file-web-/, ''));
+        const match = dbFiles.find((row) => row.id === matchId);
+        if (!match?.file_path || !file.packagePath) continue;
+        const source = path.join(PROJECT_DIR, match.file_path);
+        if (fs.existsSync(source)) archive.file(source, { name: file.packagePath });
+      }
+    }
+  }
+
+  for (const part of desktopManifest.state.parts || []) {
+    const partId = Number(String(part.id || '').replace(/^part-web-/, ''));
+    const partRow = partsById.get(partId);
+    if (!partRow) continue;
+    const partPortable = parseJsonSetting(partRow.portable_data, {});
+    if (partRow.image_path && part.imagePackagePath) {
+      const source = path.join(IMAGE_DIR, partRow.image_path);
+      if (fs.existsSync(source)) archive.file(source, { name: part.imagePackagePath });
+    }
+    if (partPortable.image_thumbnail_path && part.imageThumbnailPackagePath) {
+      const source = path.join(IMAGE_DIR, partPortable.image_thumbnail_path);
+      if (fs.existsSync(source)) archive.file(source, { name: part.imageThumbnailPackagePath });
+    }
+    for (const doc of part.documents || []) {
+      const docId = Number(String(doc.id || '').replace(/^doc-web-/, ''));
+      const match = (partDocsByPartId.get(partId) || []).find((row) => row.id === docId);
+      if (!match?.file_path || !doc.packagePath) continue;
+      const source = path.join(DOC_DIR, match.file_path);
+      if (fs.existsSync(source)) archive.file(source, { name: doc.packagePath });
+    }
+  }
+
+  for (const batch of desktopManifest.state.importBatches || []) {
+    const batchId = Number(String(batch.id || '').replace(/^batch-web-/, ''));
+    for (const item of batch.items || []) {
+      if (!item.imagePackagePath) continue;
+      const itemId = Number(String(item.id || '').replace(/^import-item-web-/, ''));
+      const match = (importItemsByBatchId.get(batchId) || []).find((row) => row.id === itemId);
+      const portable = parseJsonSetting(match?.portable_data, {});
+      const localImagePath = imageFilenameFromUrl(match?.product_image_url || '') || portable.image_path || '';
+      if (!localImagePath) continue;
+      const source = path.join(IMAGE_DIR, localImagePath);
+      if (fs.existsSync(source)) archive.file(source, { name: item.imagePackagePath });
+    }
+  }
+}
+
 // Settings: full portable backup and restore.
 app.get('/api/settings/backup', asyncHandler(async (req, res) => {
   const data = await buildBackupData();
+  const desktopManifest = buildDesktopBackupManifest(data);
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', `attachment; filename="buildbook-web-backup-${Date.now()}.zip"`);
   const archive = archiver('zip', { zlib: { level: 9 } });
   archive.on('error', (err) => { throw err; });
   archive.pipe(res);
   archive.append(JSON.stringify(data, null, 2), { name: 'backup.json' });
+  archive.append(JSON.stringify(desktopManifest, null, 2), { name: 'buildbook-backup.json' });
   addUploadDirToArchive(archive, DOC_DIR, 'uploads/documents');
   addUploadDirToArchive(archive, PROJECT_DIR, 'uploads/projects');
   addUploadDirToArchive(archive, IMAGE_DIR, 'uploads/images');
   addUploadDirToArchive(archive, IMPORT_DIR, 'uploads/imports');
+  archiveDesktopBackupAssets(archive, data, desktopManifest);
   await archive.finalize();
 }));
 
 app.post('/api/settings/restore', uploadBackup.single('file'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Backup file is required' });
   let data;
+  let desktopManifest = null;
   let directory = null;
   const isZip = req.file.originalname?.toLowerCase().endsWith('.zip') || req.file.mimetype === 'application/zip';
   if (isZip) {
     directory = await unzipper.Open.file(req.file.path);
     const backupEntry = directory.files.find((file) => file.path === 'backup.json');
-    if (!backupEntry) return res.status(400).json({ error: 'This backup zip does not include backup.json.' });
-    data = JSON.parse((await backupEntry.buffer()).toString('utf-8'));
+    const desktopEntry = directory.files.find((file) => file.path === 'buildbook-backup.json');
+    if (!backupEntry && !desktopEntry) {
+      return res.status(400).json({ error: 'This backup zip does not include backup.json.' });
+    }
+    if (backupEntry) {
+      data = JSON.parse((await backupEntry.buffer()).toString('utf-8'));
+      validateBackupData(data);
+    }
+    if (desktopEntry) {
+      desktopManifest = JSON.parse((await desktopEntry.buffer()).toString('utf-8'));
+      if (desktopManifest?.kind !== 'buildbook-full-backup' || !desktopManifest?.state || typeof desktopManifest.state !== 'object') {
+        return res.status(400).json({ error: 'This backup includes an invalid buildbook-backup.json manifest.' });
+      }
+    }
+    if (!data && desktopManifest) {
+      return res.status(400).json({ error: 'This desktop backup is missing backup.json, which BuildBook_Web restore requires.' });
+    }
   } else {
     data = JSON.parse(fs.readFileSync(req.file.path, 'utf-8'));
+    validateBackupData(data);
   }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await restoreBackupData(client, data);
     if (directory) await restoreUploadsFromZip(directory);
+    if (directory && desktopManifest) await mergeDesktopBackupPortableState(client, directory, desktopManifest.state);
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (e) {

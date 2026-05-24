@@ -78,6 +78,11 @@ export const api = {
   removeProjectStep: (projectId, stepId) => req('DELETE', `/projects/${projectId}/steps/${stepId}`),
   getProjectTemplate: () => req('GET', '/settings/project-template'),
   updateProjectTemplate: (body) => req('PUT', '/settings/project-template', body),
+  getTheme: () => req('GET', '/settings/theme'),
+  updateTheme: (body) => req('PUT', '/settings/theme', body),
+  scanStorageCleanup: () => req('GET', '/settings/storage-cleanup/scan'),
+  deleteStorageCleanup: (body) => req('POST', '/settings/storage-cleanup/delete', body),
+  resetDefaults: () => req('POST', '/settings/reset-defaults'),
 
   getImports: () => req('GET', '/imports'),
   uploadImportCsv: (form) => req('POST', '/imports/upload', form, true),

@@ -59,6 +59,16 @@ test('full restore behavior restores database records and upload files from port
   assert.equal(restore.ok, true);
 });
 
+test('desktop-compatible full restore behavior accepts backup.json plus buildbook-backup.json', destructiveOptions('desktop full restore'), async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'buildbook-restore-desktop-'));
+  const zipPath = path.join(dir, 'desktop-backup.zip');
+  await writeBackupZip(zipPath, 'desktop');
+  const form = new FormData();
+  form.append('file', new Blob([fs.readFileSync(zipPath)]), 'desktop-backup.zip');
+  const restore = await postForm('/api/settings/restore', form);
+  assert.equal(restore.ok, true);
+});
+
 test('round trip behavior can be exercised against an explicitly disposable app instance', destructiveOptions('round trip'), async () => {
   const response = await fetch(`${baseUrl}/api/settings/backup`);
   assert.equal(response.ok, true);

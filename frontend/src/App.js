@@ -8,7 +8,7 @@ import Search from './pages/Search';
 import Settings from './pages/Settings';
 import './App.css';
 
-const APP_VERSION = '0.2.19';
+const APP_VERSION = '0.2.45';
 
 export default function App() {
   return (
@@ -16,7 +16,8 @@ export default function App() {
       <div className="app">
         <nav className="sidebar">
           <div className="logo">BuildBook_Web <span>v{APP_VERSION}</span></div>
-          <NavLink to="/projects" className={({ isActive }) => isActive ? 'active' : ''}>Projects</NavLink>
+          <NavLink to="/projects" end className={({ isActive }) => isActive ? 'active' : ''}>Projects</NavLink>
+          <NavLink to="/projects/completed" className={({ isActive }) => isActive ? 'active' : ''}>Completed Projects</NavLink>
           <NavLink to="/parts" className={({ isActive }) => isActive ? 'active' : ''}>Parts Library</NavLink>
           <NavLink to="/search" className={({ isActive }) => isActive ? 'active' : ''}>Search</NavLink>
           <NavLink to="/imports" className={({ isActive }) => isActive ? 'active' : ''}>Imports</NavLink>
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="/inventory/*" element={<Navigate to="/parts" replace />} />
             <Route path="/orders/*" element={<Navigate to="/imports" replace />} />
             <Route path="/projects" element={<Projects />} />
+            <Route path="/projects/completed" element={<Projects initialFilter="completed" />} />
             <Route path="/projects/:id" element={<ProjectDetail />} />
             <Route path="/parts" element={<PartsLibrary />} />
             <Route path="/search" element={<Search />} />
