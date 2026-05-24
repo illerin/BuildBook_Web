@@ -13,7 +13,6 @@ A self-hosted web app for documenting electronics projects and keeping a searcha
 - Project file tracking with latest-file organization and browser previews
 - CSV order import review flow for adding and matching parts
 - Project import/export and portable full backup/restore
-- Color themes and reusable project template settings
 - Compatible interchange with the Windows desktop BuildBook app
 
 For the Windows desktop version, see [BuildBook](https://github.com/illerin/BuildBook).
@@ -129,14 +128,12 @@ docker compose up -d
 - Merge draft items into existing parts
 - Skip items that should not enter the library
 - Suggested matches by product URL and title search
-- Imported quantities can inform review, but parts remain reference records
 
 ### Settings
 
 - Configure project step tags, starter checklist items, and tracked file types
 - Download a portable backup zip with database records and uploaded files
 - Restore from a BuildBook_Web backup zip on the same install, a wiped Docker install, or another computer
-- Older JSON-only backups can still be restored, but they do not contain uploaded files
 
 ## Architecture
 
