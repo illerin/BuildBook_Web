@@ -26,7 +26,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.43';
+const APP_VERSION = '0.2.46';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',

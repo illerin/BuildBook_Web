@@ -6,21 +6,31 @@
 
 A self-hosted web app for documenting electronics projects and keeping a searchable reference library of parts, datasheets, product links, files, and notes.
 
-Projects are the main workspace. Parts are reusable reference records for product information, datasheets, storage location, images, and related documents.
+## Features
+
+- Project tracking with notes, checklists, tags, photos, and step-by-step instructions
+- Parts library with categories, documents, product links, storage locations, and project quantities
+- Project file tracking with latest-file organization and browser previews
+- CSV order import review flow for adding and matching parts
+- Project import/export and portable full backup/restore
+- Color themes and reusable project template settings
+- Compatible interchange with the Windows desktop BuildBook app
+
+For the Windows desktop version, see [BuildBook](https://github.com/illerin/BuildBook).
 
 ## Screenshots
 
-### Projects
+### Project Overview
 
-![Projects tab](docs/images/projects-tab.png)
+![Project overview](sample%20images/Project%20overview.PNG)
 
 ### Parts Library
 
-![Parts Library tab](docs/images/parts-tab.png)
+![Parts library](sample%20images/Parts%20Library.PNG)
 
-### Imports
+### Project Files
 
-![Imports tab](docs/images/imports-tab.png)
+![Project files](sample%20images/Project%20Files.PNG)
 
 ## Quick Start
 
