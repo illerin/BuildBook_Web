@@ -12,6 +12,81 @@ function docUrl(path) {
   return `${API_BASE}/files/documents/${path}`;
 }
 
+function fileLooksImage(file) {
+  return !!file && (file.type?.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(file.name || ''));
+}
+
+function droppedFiles(event, accept = () => true) {
+  event.preventDefault();
+  event.stopPropagation();
+  return Array.from(event.dataTransfer?.files || []).filter(accept);
+}
+
+function makeLocalId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function storageLabel(containerName, slotName = '') {
+  return [containerName, slotName].map((value) => String(value || '').trim()).filter(Boolean).join(' / ');
+}
+
+function storageSelectionFromPart(part, storageLocations) {
+  const portable = part?.portable_data || {};
+  const container = storageLocations.find((location) => String(location.id) === String(portable.storage_container_id || ''))
+    || storageLocations.find((location) => location.name.toLowerCase() === String(part?.storage_location || '').split('/')[0]?.trim().toLowerCase());
+  const slot = container?.slots?.find((item) => String(item.id) === String(portable.storage_slot_id || ''));
+  return {
+    containerId: container?.id || '',
+    slotId: slot?.id || '',
+  };
+}
+
+function applyStorageSelection(storageLocations, selection) {
+  let locations = (storageLocations || []).map((location) => ({
+    ...location,
+    slots: Array.isArray(location.slots) ? [...location.slots] : [],
+  }));
+  let containerId = selection.storage_container_id || '';
+  let slotId = selection.storage_slot_id || '';
+
+  if (selection.new_storage_container?.trim()) {
+    const name = selection.new_storage_container.trim();
+    const existing = locations.find((location) => location.name.toLowerCase() === name.toLowerCase());
+    if (existing) containerId = existing.id;
+    else {
+      const container = { id: makeLocalId('storage'), name, slots: [] };
+      locations = [...locations, container];
+      containerId = container.id;
+    }
+  }
+
+  if (selection.new_storage_slot?.trim() && containerId) {
+    const name = selection.new_storage_slot.trim();
+    locations = locations.map((location) => {
+      if (String(location.id) !== String(containerId)) return location;
+      const existing = location.slots.find((slot) => slot.name.toLowerCase() === name.toLowerCase());
+      if (existing) {
+        slotId = existing.id;
+        return location;
+      }
+      const slot = { id: makeLocalId('slot'), name };
+      slotId = slot.id;
+      return { ...location, slots: [...location.slots, slot].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })) };
+    });
+  }
+
+  const container = locations.find((location) => String(location.id) === String(containerId));
+  const slot = container?.slots?.find((item) => String(item.id) === String(slotId));
+  return {
+    storageLocations: locations.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    partPatch: {
+      storage_location: storageLabel(container?.name, slot?.name),
+      storage_container_id: container?.id || '',
+      storage_slot_id: slot?.id || '',
+    },
+  };
+}
+
 function fileExtension(name) {
   const match = String(name || '').toLowerCase().match(/\.[^.]+$/);
   return match ? match[0] : '';
@@ -659,18 +734,36 @@ function PartModal({ part, categories, onClose, onSave }) {
     category_id: part?.category_id || '',
     product_url: part?.product_url || '',
     storage_location: part?.storage_location || '',
+    storage_container_id: '',
+    storage_slot_id: '',
+    new_storage_container: '',
+    new_storage_slot: '',
     notes: part?.notes || '',
     spec_summary: part?.spec_summary || '',
   });
   const [err, setErr] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [documentFile, setDocumentFile] = useState(null);
+  const [imageDropActive, setImageDropActive] = useState(false);
+  const [documentDropActive, setDocumentDropActive] = useState(false);
+  const [creatingContainer, setCreatingContainer] = useState(false);
+  const [creatingSlot, setCreatingSlot] = useState(false);
   const [projects, setProjects] = useState([]);
+  const [storageLocations, setStorageLocations] = useState([]);
   const [projectId, setProjectId] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     api.getProjects().then(setProjects).catch((e) => setErr(e.message));
+    api.getStorageLocations().then((locations) => {
+      setStorageLocations(locations);
+      const selection = storageSelectionFromPart(part, locations);
+      setForm((current) => ({
+        ...current,
+        storage_container_id: selection.containerId,
+        storage_slot_id: selection.slotId,
+      }));
+    }).catch((e) => setErr(e.message));
   }, []);
 
   const set = (key, value) => setForm((p) => ({ ...p, [key]: value }));
@@ -681,6 +774,14 @@ function PartModal({ part, categories, onClose, onSave }) {
     setErr('');
     try {
       const body = { ...form, category_id: form.category_id || null };
+      const storage = applyStorageSelection(storageLocations, form);
+      if (JSON.stringify(storage.storageLocations) !== JSON.stringify(storageLocations)) {
+        await api.updateStorageLocations(storage.storageLocations);
+        setStorageLocations(storage.storageLocations);
+      }
+      body.storage_location = storage.partPatch.storage_location;
+      body.storage_container_id = storage.partPatch.storage_container_id;
+      body.storage_slot_id = storage.partPatch.storage_slot_id;
       const saved = part ? await api.updatePart(part.id, body) : await api.createPart(body);
       if (imageFile) {
         const upload = new FormData();
@@ -709,7 +810,7 @@ function PartModal({ part, categories, onClose, onSave }) {
       setErr('Enter a part name before searching for images.');
       return;
     }
-    const searchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(`${query} part image`)}`;
+    const searchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`;
     window.open(searchUrl, '_blank', 'noopener,noreferrer');
   };
 
@@ -739,21 +840,101 @@ function PartModal({ part, categories, onClose, onSave }) {
             <input value={form.product_url} onChange={(e) => set('product_url', e.target.value)} placeholder="https://..." />
           </div>
           <div className="form-group">
-            <label>Storage location</label>
-            <input value={form.storage_location} onChange={(e) => set('storage_location', e.target.value)} placeholder="Bin, drawer, shelf..." />
+            <label>Storage container</label>
+            <select value={creatingContainer ? '__new__' : form.storage_container_id} onChange={(e) => {
+              if (e.target.value === '__new__') {
+                setCreatingContainer(true);
+                setCreatingSlot(true);
+                setForm((current) => ({ ...current, storage_container_id: '', storage_slot_id: '', new_storage_container: '', new_storage_slot: '' }));
+              } else {
+                setCreatingContainer(false);
+                setCreatingSlot(false);
+                setForm((current) => ({ ...current, storage_container_id: e.target.value, storage_slot_id: '', new_storage_container: '', new_storage_slot: '' }));
+              }
+            }}>
+              <option value="__new__">Create new container...</option>
+              <option value="">No container</option>
+              {storageLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+            </select>
           </div>
         </div>
+        {creatingContainer && (
+          <div className="form-row">
+            <div className="form-group">
+              <label>New container</label>
+              <input value={form.new_storage_container} onChange={(e) => set('new_storage_container', e.target.value)} placeholder="Organizer A, Drawer Cabinet..." />
+            </div>
+            <div className="form-group">
+              <label>New slot / bin / drawer</label>
+              <input value={form.new_storage_slot} onChange={(e) => set('new_storage_slot', e.target.value)} placeholder="Bin 1, Drawer 3, Loose..." />
+            </div>
+          </div>
+        )}
+        {!creatingContainer && (
+          <div className="form-row">
+            <div className="form-group">
+              <label>Slot / bin / drawer</label>
+              <select
+                disabled={!form.storage_container_id}
+                value={creatingSlot ? '__new__' : form.storage_slot_id}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') {
+                    setCreatingSlot(true);
+                    setForm((current) => ({ ...current, storage_slot_id: '', new_storage_slot: '' }));
+                  } else {
+                    setCreatingSlot(false);
+                    setForm((current) => ({ ...current, storage_slot_id: e.target.value, new_storage_slot: '' }));
+                  }
+                }}
+              >
+                <option value="__new__">Create new slot...</option>
+                <option value="">No slot</option>
+                {(storageLocations.find((location) => String(location.id) === String(form.storage_container_id))?.slots || []).map((slot) => (
+                  <option key={slot.id} value={slot.id}>{slot.name}</option>
+                ))}
+              </select>
+            </div>
+            {creatingSlot && (
+              <div className="form-group">
+                <label>New slot / bin / drawer</label>
+                <input value={form.new_storage_slot} onChange={(e) => set('new_storage_slot', e.target.value)} placeholder="Bin 1, Drawer 3, Loose..." />
+              </div>
+            )}
+          </div>
+        )}
         <div className="form-group">
           <label>Image</label>
-          <div className="image-picker-row">
+          <div
+            className={`part-drop-field ${imageDropActive ? 'drop-active' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); setImageDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+            onDragLeave={() => setImageDropActive(false)}
+            onDrop={(e) => {
+              setImageDropActive(false);
+              const [file] = droppedFiles(e, fileLooksImage);
+              if (file) setImageFile(file);
+            }}
+          >
             <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
             <button type="button" className="btn btn-secondary" onClick={openImageSearch}>Search Images</button>
+            <span>{imageFile?.name || 'Drop image here'}</span>
           </div>
         </div>
         <div className="form-row">
           <div className="form-group">
             <label>Document</label>
-            <input type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
+            <div
+              className={`part-drop-field ${documentDropActive ? 'drop-active' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDocumentDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+              onDragLeave={() => setDocumentDropActive(false)}
+              onDrop={(e) => {
+                setDocumentDropActive(false);
+                const [file] = droppedFiles(e);
+                if (file) setDocumentFile(file);
+              }}
+            >
+              <input type="file" onChange={(e) => setDocumentFile(e.target.files?.[0] || null)} />
+              <span>{documentFile?.name || 'Drop document here'}</span>
+            </div>
           </div>
           <div className="form-group">
             <label>Add to project</label>
@@ -791,6 +972,8 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
   const [expandedImage, setExpandedImage] = useState(false);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [imageDropActive, setImageDropActive] = useState(false);
+  const [documentDropActive, setDocumentDropActive] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
@@ -862,14 +1045,18 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     }
   };
 
-  const uploadImage = async (e) => {
-    const selected = e.target.files[0];
+  const uploadImageFile = async (selected) => {
     if (!selected) return;
     const form = new FormData();
     form.append('image', selected);
     await api.uploadPartImage(part.id, form);
     await load();
     onChanged();
+  };
+
+  const uploadImage = async (e) => {
+    await uploadImageFile(e.target.files[0]);
+    e.target.value = '';
   };
 
   const uploadDoc = async () => {
@@ -911,7 +1098,16 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
     <ModalOverlay onClose={onClose}>
       <div className="modal detail-modal">
         <div className="detail-header">
-          <div className="detail-image-slot">
+          <div
+            className={`detail-image-slot part-drop-zone ${imageDropActive ? 'drop-active' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); setImageDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+            onDragLeave={() => setImageDropActive(false)}
+            onDrop={async (e) => {
+              setImageDropActive(false);
+              const [selected] = droppedFiles(e, fileLooksImage);
+              await uploadImageFile(selected);
+            }}
+          >
             {part.image_path ? (
               <button className="detail-image-button" onClick={() => setExpandedImage(true)} aria-label={`Expand image for ${part.name}`}>
                 <img src={imageUrl(part.image_path)} alt="" />
@@ -973,7 +1169,16 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
               </section>
             </div>
 
-            <section className="card">
+            <section
+              className={`card part-drop-zone ${documentDropActive ? 'drop-active' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDocumentDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+              onDragLeave={() => setDocumentDropActive(false)}
+              onDrop={(e) => {
+                setDocumentDropActive(false);
+                const [selected] = droppedFiles(e);
+                if (selected) setFile(selected);
+              }}
+            >
               <h3>Documents</h3>
               {part.documents?.length ? part.documents.map((doc) => (
                 <div key={doc.id} className={`file-row ${selectedDoc?.id === doc.id ? 'selected-file-row' : ''}`}>
@@ -986,6 +1191,7 @@ function PartDetailModal({ partId, categories, onClose, onEdit, onChanged }) {
               )) : <p className="muted">No documents attached.</p>}
               <div className="upload-line">
                 <input type="file" onChange={(e) => setFile(e.target.files[0])} />
+                {file && <span className="muted">{file.name}</span>}
                 <button className="btn btn-primary btn-sm" disabled={!file || uploading} onClick={uploadDoc}>
                   {uploading ? 'Uploading...' : 'Upload'}
                 </button>

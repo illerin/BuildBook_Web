@@ -29,6 +29,7 @@ export const PROJECT_EXPORT_CAPABILITIES = [
   'part_images',
   'part_documents_multi',
   'default_part_preview_document',
+  'structured_storage_locations',
   'file_tracker_metadata',
   'folder_uploads',
 ];
@@ -153,13 +154,17 @@ function normalizeProjectExportManifest(manifest) {
     optional_capabilities: Array.isArray(manifest.optional_capabilities) ? manifest.optional_capabilities : PROJECT_EXPORT_OPTIONAL_CAPABILITIES,
     files: Array.isArray(manifest.files) ? manifest.files.map((file) => ({
       ...file,
-      id: file?.id ?? '',
+      id: file?.id === undefined || file?.id === null ? '' : String(file.id),
     })) : manifest.files,
+    note_images: Array.isArray(manifest.note_images) ? manifest.note_images.map((image, index) => ({
+      ...image,
+      id: image?.id === undefined || image?.id === null ? `note-image-${index + 1}` : String(image.id),
+    })) : manifest.note_images,
     parts: Array.isArray(manifest.parts) ? manifest.parts.map((part) => ({
       ...part,
       documents: Array.isArray(part?.documents) ? part.documents.map((doc) => ({
         ...doc,
-        id: doc?.id ?? '',
+        id: doc?.id === undefined || doc?.id === null ? '' : String(doc.id),
       })) : part?.documents,
     })) : manifest.parts,
   };

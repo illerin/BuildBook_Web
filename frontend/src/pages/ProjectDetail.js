@@ -36,6 +36,63 @@ function documentUrl(path) {
   return `${API_BASE}/files/documents/${path}`;
 }
 
+function fileLooksImage(file) {
+  return !!file && (file.type?.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(file.name || ''));
+}
+
+function droppedFiles(event, accept = () => true) {
+  event.preventDefault();
+  event.stopPropagation();
+  return Array.from(event.dataTransfer?.files || []).filter(accept);
+}
+
+function storageLabel(containerName, slotName = '') {
+  return [containerName, slotName].map((value) => String(value || '').trim()).filter(Boolean).join(' / ');
+}
+
+function applyStorageSelection(storageLocations, selection) {
+  let locations = (storageLocations || []).map((location) => ({
+    ...location,
+    slots: Array.isArray(location.slots) ? [...location.slots] : [],
+  }));
+  let containerId = selection.storage_container_id || '';
+  let slotId = selection.storage_slot_id || '';
+  if (selection.new_storage_container?.trim()) {
+    const name = selection.new_storage_container.trim();
+    const existing = locations.find((location) => location.name.toLowerCase() === name.toLowerCase());
+    if (existing) containerId = existing.id;
+    else {
+      const container = { id: makeLocalId('storage'), name, slots: [] };
+      locations = [...locations, container];
+      containerId = container.id;
+    }
+  }
+  if (selection.new_storage_slot?.trim() && containerId) {
+    const name = selection.new_storage_slot.trim();
+    locations = locations.map((location) => {
+      if (String(location.id) !== String(containerId)) return location;
+      const existing = location.slots.find((slot) => slot.name.toLowerCase() === name.toLowerCase());
+      if (existing) {
+        slotId = existing.id;
+        return location;
+      }
+      const slot = { id: makeLocalId('slot'), name };
+      slotId = slot.id;
+      return { ...location, slots: [...location.slots, slot].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })) };
+    });
+  }
+  const container = locations.find((location) => String(location.id) === String(containerId));
+  const slot = container?.slots?.find((item) => String(item.id) === String(slotId));
+  return {
+    storageLocations: locations.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    partPatch: {
+      storage_location: storageLabel(container?.name, slot?.name),
+      storage_container_id: container?.id || '',
+      storage_slot_id: slot?.id || '',
+    },
+  };
+}
+
 function fileExtension(name) {
   const match = String(name || '').toLowerCase().match(/\.[^.]+$/);
   return match ? match[0] : '';
@@ -2196,23 +2253,42 @@ function CreateProjectPartModal({ project, onClose, onSave }) {
   const [categories, setCategories] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [storageLocations, setStorageLocations] = useState([]);
+  const [creatingContainer, setCreatingContainer] = useState(false);
+  const [creatingSlot, setCreatingSlot] = useState(false);
   const [imageFile, setImageFile] = useState(null);
   const [documentFiles, setDocumentFiles] = useState([]);
+  const [imageDropActive, setImageDropActive] = useState(false);
+  const [documentDropActive, setDocumentDropActive] = useState(false);
   const [form, setForm] = useState({
     name: '',
     category_id: '',
     product_url: '',
     storage_location: '',
+    storage_container_id: '',
+    storage_slot_id: '',
+    new_storage_container: '',
+    new_storage_slot: '',
     spec_summary: '',
     notes: '',
   });
 
   useEffect(() => {
     api.getCategories().then(setCategories).catch((err) => setError(err.message));
+    api.getStorageLocations().then(setStorageLocations).catch((err) => setError(err.message));
   }, []);
 
   const setField = (key, value) => setForm((current) => ({ ...current, [key]: value }));
   const categoryOptions = useMemo(() => orderedCategoryOptions(categories), [categories]);
+
+  const openImageSearch = () => {
+    const query = form.name.trim();
+    if (!query) {
+      setError('Enter a part name before searching for images.');
+      return;
+    }
+    window.open(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(query)}`, '_blank', 'noopener,noreferrer');
+  };
 
   const save = async () => {
     if (!form.name.trim()) {
@@ -2222,10 +2298,18 @@ function CreateProjectPartModal({ project, onClose, onSave }) {
     setSaving(true);
     setError('');
     try {
+      const storage = applyStorageSelection(storageLocations, form);
+      if (JSON.stringify(storage.storageLocations) !== JSON.stringify(storageLocations)) {
+        await api.updateStorageLocations(storage.storageLocations);
+        setStorageLocations(storage.storageLocations);
+      }
       const created = await api.createPart({
         ...form,
         name: form.name.trim(),
         category_id: form.category_id || null,
+        storage_location: storage.partPatch.storage_location,
+        storage_container_id: storage.partPatch.storage_container_id,
+        storage_slot_id: storage.partPatch.storage_slot_id,
       });
       if (imageFile) {
         const imageForm = new FormData();
@@ -2268,16 +2352,97 @@ function CreateProjectPartModal({ project, onClose, onSave }) {
             <input value={form.product_url} onChange={(e) => setField('product_url', e.target.value)} />
           </div>
           <div className="form-group">
-            <label>Storage Location</label>
-            <input value={form.storage_location} onChange={(e) => setField('storage_location', e.target.value)} />
+            <label>Storage container</label>
+            <select value={creatingContainer ? '__new__' : form.storage_container_id} onChange={(e) => {
+              if (e.target.value === '__new__') {
+                setCreatingContainer(true);
+                setCreatingSlot(true);
+                setForm((current) => ({ ...current, storage_container_id: '', storage_slot_id: '', new_storage_container: '', new_storage_slot: '' }));
+              } else {
+                setCreatingContainer(false);
+                setCreatingSlot(false);
+                setForm((current) => ({ ...current, storage_container_id: e.target.value, storage_slot_id: '', new_storage_container: '', new_storage_slot: '' }));
+              }
+            }}>
+              <option value="__new__">Create new container...</option>
+              <option value="">No container</option>
+              {storageLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+            </select>
           </div>
+          {creatingContainer && (
+            <>
+              <div className="form-group">
+                <label>New container</label>
+                <input value={form.new_storage_container} onChange={(e) => setField('new_storage_container', e.target.value)} placeholder="Organizer A, Drawer Cabinet..." />
+              </div>
+              <div className="form-group">
+                <label>New slot / bin / drawer</label>
+                <input value={form.new_storage_slot} onChange={(e) => setField('new_storage_slot', e.target.value)} placeholder="Bin 1, Drawer 3, Loose..." />
+              </div>
+            </>
+          )}
+          {!creatingContainer && (
+            <div className="form-group">
+              <label>Slot / bin / drawer</label>
+              <select
+                disabled={!form.storage_container_id}
+                value={creatingSlot ? '__new__' : form.storage_slot_id}
+                onChange={(e) => {
+                  if (e.target.value === '__new__') {
+                    setCreatingSlot(true);
+                    setForm((current) => ({ ...current, storage_slot_id: '', new_storage_slot: '' }));
+                  } else {
+                    setCreatingSlot(false);
+                    setForm((current) => ({ ...current, storage_slot_id: e.target.value, new_storage_slot: '' }));
+                  }
+                }}
+              >
+                <option value="__new__">Create new slot...</option>
+                <option value="">No slot</option>
+                {(storageLocations.find((location) => String(location.id) === String(form.storage_container_id))?.slots || []).map((slot) => (
+                  <option key={slot.id} value={slot.id}>{slot.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {!creatingContainer && creatingSlot && (
+            <div className="form-group">
+              <label>New slot / bin / drawer</label>
+              <input value={form.new_storage_slot} onChange={(e) => setField('new_storage_slot', e.target.value)} placeholder="Bin 1, Drawer 3, Loose..." />
+            </div>
+          )}
           <div className="form-group">
             <label>Image</label>
-            <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+            <div
+              className={`part-drop-field ${imageDropActive ? 'drop-active' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setImageDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+              onDragLeave={() => setImageDropActive(false)}
+              onDrop={(e) => {
+                setImageDropActive(false);
+                const [file] = droppedFiles(e, fileLooksImage);
+                if (file) setImageFile(file);
+              }}
+            >
+              <input type="file" accept="image/*" onChange={(e) => setImageFile(e.target.files?.[0] || null)} />
+              <button type="button" className="btn btn-secondary" onClick={openImageSearch}>Search Images</button>
+              <span>{imageFile?.name || 'Drop image here'}</span>
+            </div>
           </div>
           <div className="form-group">
             <label>Documents</label>
-            <input type="file" multiple onChange={(e) => setDocumentFiles(Array.from(e.target.files || []))} />
+            <div
+              className={`part-drop-field ${documentDropActive ? 'drop-active' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); setDocumentDropActive(true); e.dataTransfer.dropEffect = 'copy'; }}
+              onDragLeave={() => setDocumentDropActive(false)}
+              onDrop={(e) => {
+                setDocumentDropActive(false);
+                const files = droppedFiles(e);
+                if (files.length) setDocumentFiles((current) => [...current, ...files]);
+              }}
+            >
+              <input type="file" multiple onChange={(e) => setDocumentFiles(Array.from(e.target.files || []))} />
+              <span>{documentFiles.length ? `${documentFiles.length} document${documentFiles.length === 1 ? '' : 's'} selected` : 'Drop documents here'}</span>
+            </div>
           </div>
         </div>
         <div className="form-group">

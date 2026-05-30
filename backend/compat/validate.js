@@ -1,9 +1,15 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   TYPE_PROJECT_EXPORT,
   TYPE_FULL_BACKUP,
   SUPPORTED_WEB_BACKUP_VERSIONS,
-  BACKUP_TABLES,
+  BACKUP_TABLES
 } from './contract.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, '..');
 
 function fail(message) {
   const error = new Error(message);
@@ -76,10 +82,7 @@ function expectHandshake(manifest, expectedType) {
 function expectProjectExportFile(file, index) {
   expectRecord(file, `files[${index}]`);
   for (const key of ['id', 'original_filename', 'file_type', 'tracker_key', 'file_category', 'archive_path']) {
-    const value = file[key];
-    if (!(isNonEmptyString(value) || typeof value === 'number')) {
-      fail(`files[${index}].${key} must be a non-empty string.`);
-    }
+    if (!isNonEmptyString(file[key])) fail(`files[${index}].${key} must be a non-empty string.`);
   }
   if (typeof file.is_latest !== 'boolean') fail(`files[${index}].is_latest must be a boolean.`);
   expectTimestamp(file.uploaded_at, `files[${index}].uploaded_at`);
@@ -90,10 +93,7 @@ function expectProjectExportFile(file, index) {
 function expectProjectExportPartDocument(doc, partIndex, docIndex) {
   expectRecord(doc, `parts[${partIndex}].documents[${docIndex}]`);
   for (const key of ['id', 'file_type', 'file_path', 'original_filename', 'archive_path']) {
-    const value = doc[key];
-    if (!(isNonEmptyString(value) || typeof value === 'number')) {
-      fail(`parts[${partIndex}].documents[${docIndex}].${key} must be a non-empty string.`);
-    }
+    if (!isNonEmptyString(doc[key])) fail(`parts[${partIndex}].documents[${docIndex}].${key} must be a non-empty string.`);
   }
   if (typeof doc.is_primary !== 'boolean') fail(`parts[${partIndex}].documents[${docIndex}].is_primary must be a boolean.`);
   expectOptionalString(doc.text_content, `parts[${partIndex}].documents[${docIndex}].text_content`);
@@ -107,7 +107,7 @@ function expectProjectExportPart(part, index) {
   expectCategoryPath(part.category_path, `parts[${index}].category_path`);
   if (!isNonEmptyString(part.category_label)) fail(`parts[${index}].category_label must be a non-empty string.`);
   if (!Number.isInteger(part.quantity) || part.quantity < 1) fail(`parts[${index}].quantity must be an integer >= 1.`);
-  for (const key of ['product_url', 'storage_location', 'notes', 'spec_summary', 'image_archive_path']) {
+  for (const key of ['product_url', 'storage_location', 'storage_container_id', 'storage_slot_id', 'notes', 'spec_summary', 'image_archive_path']) {
     expectOptionalString(part[key], `parts[${index}].${key}`);
   }
   expectArray(part.documents, `parts[${index}].documents`);
@@ -120,7 +120,7 @@ function expectProjectExportChecklist(item, index) {
   if (!isNonEmptyString(item.text)) fail(`checklist[${index}].text must be a non-empty string.`);
   if (typeof item.is_completed !== 'boolean') fail(`checklist[${index}].is_completed must be a boolean.`);
   if (!Number.isInteger(item.order_index)) fail(`checklist[${index}].order_index must be an integer.`);
-  if (item.completed_at !== null) expectOptionalString(item.completed_at, `checklist[${index}].completed_at`);
+  expectOptionalString(item.completed_at, `checklist[${index}].completed_at`);
 }
 
 function expectProjectExportStep(step, index) {
@@ -155,6 +155,7 @@ function expectInstructionStep(step, index) {
   for (const key of ['id', 'title', 'body']) {
     if (!isNonEmptyString(step[key])) fail(`instructions.steps[${index}].${key} must be a non-empty string.`);
   }
+  if (/data:image\//i.test(step.body)) fail(`instructions.steps[${index}].body must reference packaged image assets, not inline base64 image data.`);
   if (!Number.isInteger(step.order_index)) fail(`instructions.steps[${index}].order_index must be an integer.`);
   expectOptionalString(step.photo_id, `instructions.steps[${index}].photo_id`);
 }
@@ -165,14 +166,18 @@ export function validateProjectManifest(manifest) {
   if (!isNonEmptyString(manifest.project.name)) fail('project.name must be a non-empty string.');
   expectOptionalString(manifest.project.status, 'project.status');
   expectOptionalString(manifest.project.notes, 'project.notes');
+  if (/data:image\//i.test(manifest.project.notes || '')) fail('project.notes must reference packaged image assets, not inline base64 image data.');
   expectOptionalString(manifest.project.image_path, 'project.image_path');
   expectOptionalString(manifest.project.image_archive_path, 'project.image_archive_path');
+
   expectArray(manifest.note_images, 'note_images');
   manifest.note_images.forEach((image, index) => {
     expectRecord(image, `note_images[${index}]`);
+    if (!isNonEmptyString(image.id)) fail(`note_images[${index}].id must be a non-empty string.`);
     if (!isNonEmptyString(image.image_path)) fail(`note_images[${index}].image_path must be a non-empty string.`);
     if (!isNonEmptyString(image.archive_path)) fail(`note_images[${index}].archive_path must be a non-empty string.`);
   });
+
   expectArray(manifest.steps, 'steps');
   manifest.steps.forEach(expectProjectExportStep);
   expectArray(manifest.checklist, 'checklist');
@@ -185,6 +190,7 @@ export function validateProjectManifest(manifest) {
   manifest.photo_library.forEach(expectProjectPhotoFolder);
   expectRecord(manifest.instructions, 'instructions');
   expectOptionalString(manifest.instructions.intro, 'instructions.intro');
+  if (/data:image\//i.test(manifest.instructions.intro || '')) fail('instructions.intro must reference packaged image assets, not inline base64 image data.');
   expectArray(manifest.instructions.steps, 'instructions.steps');
   manifest.instructions.steps.forEach(expectInstructionStep);
   return manifest;
@@ -209,4 +215,24 @@ export function validateLegacyBackupManifest(manifest) {
     expectArray(manifest[table], table);
   }
   return manifest;
+}
+
+export function readJson(relativePath) {
+  return JSON.parse(fs.readFileSync(path.join(root, relativePath), 'utf8'));
+}
+
+export function validateFixtureDescriptor(fixture) {
+  expectRecord(fixture, 'fixture');
+  for (const key of ['fixture_name', 'source_app', 'manifest_path']) {
+    if (!isNonEmptyString(fixture[key])) fail(`${key} must be a non-empty string.`);
+  }
+  expectArray(fixture.sidecar_entries, 'sidecar_entries');
+  expectArray(fixture.required_assertions, 'required_assertions');
+  return fixture;
+}
+
+export function readFixtureManifest(relativePath) {
+  const fixture = validateFixtureDescriptor(readJson(relativePath));
+  const manifestPath = path.normalize(path.join(path.dirname(relativePath), fixture.manifest_path));
+  return { fixture, manifest: readJson(manifestPath) };
 }

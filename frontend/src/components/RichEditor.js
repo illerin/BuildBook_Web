@@ -45,9 +45,8 @@ export default function RichEditor({
     setShowLink(false);
   };
 
-  const insertUploadedImage = async (file) => {
-    if (!file || !onUploadImage) return;
-    const url = await onUploadImage(file);
+  const insertImageUrl = (url) => {
+    if (!url) return;
     ref.current?.focus();
     document.execCommand(
       'insertHTML',
@@ -55,6 +54,11 @@ export default function RichEditor({
       `<img src="${url}" alt="" style="width:60%;max-width:100%;height:auto;display:block;margin:10px 0;border-radius:6px;" />`,
     );
     emit();
+  };
+
+  const insertUploadedImage = async (file) => {
+    if (!file || !onUploadImage) return;
+    insertImageUrl(await onUploadImage(file));
   };
 
   const pickImage = async (event) => {
@@ -182,6 +186,15 @@ export default function RichEditor({
             e.preventDefault();
             onSave();
           }
+        }}
+        onPaste={async (e) => {
+          const imageItem = [...(e.clipboardData?.items || [])]
+            .find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+          if (!imageItem || !onUploadImage) return;
+          const file = imageItem.getAsFile();
+          if (!file) return;
+          e.preventDefault();
+          await insertUploadedImage(file);
         }}
       />
       {markupImage && (

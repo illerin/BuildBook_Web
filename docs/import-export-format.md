@@ -93,6 +93,8 @@ Top-level fields:
 - `category_label`
 - `product_url`
 - `storage_location`
+- `storage_container_id`
+- `storage_slot_id`
 - `notes`
 - `spec_summary`
 - `image_archive_path`
@@ -151,6 +153,7 @@ Top-level fields:
 - `uploads/projects/*` maps to `project_file.file_path`
 - `uploads/images/*` maps to `project.image_path`, `part.image_path`, `category.image_path`, and image references inside project notes
 - `uploads/imports/*` maps to import-related files when used by an import workflow
+- `app_metadata` key `storage_locations` stores structured storage containers and slots used by parts
 
 ## Project Export vs Full Backup
 
@@ -172,6 +175,9 @@ The desktop app depends on these fields remaining present and semantically stabl
 - `original_filename`
 - `file_path`
 - `image_path`
+- `storage_location`
+- `storage_container_id`
+- `storage_slot_id`
 
 ## Manual Compatibility Checklist
 

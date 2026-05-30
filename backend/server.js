@@ -26,7 +26,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
-const APP_VERSION = '0.2.46';
+const APP_VERSION = '0.2.50';
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgresql://buildbook_web:buildbook_web@localhost:5432/buildbook_web',
@@ -81,6 +81,47 @@ function encodePathSegment(value = '') {
 
 function imageFileUrl(value = '') {
   return `/files/images/${encodePathSegment(value)}`;
+}
+
+function imageExtensionFromMime(mime = '') {
+  const value = String(mime).toLowerCase();
+  if (value === 'image/jpeg' || value === 'image/jpg') return '.jpg';
+  if (value === 'image/png') return '.png';
+  if (value === 'image/webp') return '.webp';
+  if (value === 'image/gif') return '.gif';
+  if (value === 'image/svg+xml') return '.svg';
+  if (value === 'image/bmp') return '.bmp';
+  if (value === 'image/avif') return '.avif';
+  return '.png';
+}
+
+function saveDataImageAsset(dataUrl, context = 'rich-image') {
+  const match = String(dataUrl || '').match(/^data:(image\/[^;,]+)([^,]*),(.*)$/is);
+  if (!match) return null;
+  const [, mime, meta, payload] = match;
+  const bytes = /;base64/i.test(meta)
+    ? Buffer.from(payload, 'base64')
+    : Buffer.from(decodeURIComponent(payload), 'utf8');
+  if (!bytes.length) return null;
+  const filename = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}-${safeName(context)}${imageExtensionFromMime(mime)}`;
+  fs.writeFileSync(path.join(IMAGE_DIR, filename), bytes);
+  return filename;
+}
+
+function externalizeInlineDataImages(html, context = 'rich-image') {
+  let next = String(html || '');
+  const matches = [...next.matchAll(/<img\b[^>]*\bsrc=(["'])(data:image\/[^"']+)\1[^>]*>/gi)];
+  matches.forEach((match, index) => {
+    const tag = match[0];
+    const filename = saveDataImageAsset(match[2], `${context}-${index + 1}`);
+    if (!filename) return;
+    let nextTag = tag.split(match[2]).join(imageFileUrl(filename));
+    nextTag = /data-project-image-path=/i.test(nextTag)
+      ? nextTag.replace(/\sdata-project-image-path=(["'])[^"']*\1/i, ` data-project-image-path="${filename}"`)
+      : nextTag.replace(/<img\b/i, `<img data-project-image-path="${filename}"`);
+    next = next.replace(tag, nextTag);
+  });
+  return next;
 }
 
 app.use('/files/documents', express.static(DOC_DIR));
@@ -321,6 +362,39 @@ async function setJsonSetting(client, key, value) {
   );
 }
 
+function normalizeStorageLocations(value) {
+  return (Array.isArray(value) ? value : [])
+    .map((location) => ({
+      id: String(location.id || '').trim(),
+      name: String(location.name || '').trim(),
+      slots: (Array.isArray(location.slots) ? location.slots : [])
+        .map((slot) => ({
+          id: String(slot.id || '').trim(),
+          name: String(slot.name || '').trim(),
+        }))
+        .filter((slot) => slot.id && slot.name)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    }))
+    .filter((location) => location.id && location.name)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function storageLabelFromIds(storageLocations, containerId, slotId, fallback = '') {
+  const container = storageLocations.find((location) => String(location.id) === String(containerId || ''));
+  const slot = container?.slots?.find((item) => String(item.id) === String(slotId || ''));
+  return [container?.name, slot?.name].map((value) => String(value || '').trim()).filter(Boolean).join(' / ') || fallback || null;
+}
+
+function storagePortablePatch(body, currentPortable = {}, storageLocations = []) {
+  const next = { ...parseJsonSetting(currentPortable, {}) };
+  if (Object.prototype.hasOwnProperty.call(body, 'storage_container_id')) next.storage_container_id = String(body.storage_container_id || '');
+  if (Object.prototype.hasOwnProperty.call(body, 'storage_slot_id')) next.storage_slot_id = String(body.storage_slot_id || '');
+  return {
+    portable_data: next,
+    storage_location: storageLabelFromIds(storageLocations, next.storage_container_id, next.storage_slot_id, body.storage_location || ''),
+  };
+}
+
 async function getProjectTemplate() {
   const [stepResult, checklist, trackers] = await Promise.all([
     pool.query(`SELECT * FROM step_definition ORDER BY order_index, name`),
@@ -366,6 +440,20 @@ function serializePortableProjectData(value) {
     desktop_export_options: data.desktop_export_options,
     manifest_extensions: data.manifest_extensions,
   };
+}
+
+function externalizePortableProjectDataInlineImages(value, context = 'project') {
+  const data = normalizePortableProjectData(value);
+  return serializePortableProjectData({
+    ...data,
+    instructions: {
+      intro: externalizeInlineDataImages(data.instructions.intro, `${context}-instructions-intro`),
+      steps: data.instructions.steps.map((step, index) => ({
+        ...step,
+        body: externalizeInlineDataImages(step.body, `${context}-instructions-step-${index + 1}`),
+      })),
+    },
+  });
 }
 
 function collectRichImageRefs(html, context, refs = []) {
@@ -513,7 +601,10 @@ function extractImagePathsFromHtml(value) {
   const found = new Set();
   const pattern = /\/files\/images\/([^"')\s<>]+)/g;
   let match;
-  while ((match = pattern.exec(text))) found.add(match[1]);
+  while ((match = pattern.exec(text))) {
+    const raw = match[1].split(/[?#]/)[0];
+    try { found.add(decodeURIComponent(raw)); } catch { found.add(raw); }
+  }
   return [...found];
 }
 
@@ -1307,12 +1398,14 @@ app.get('/api/parts', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/parts', asyncHandler(async (req, res) => {
-  const { name, category_id, product_url, storage_location, notes, spec_summary } = req.body;
+  const { name, category_id, product_url, notes, spec_summary } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Part name is required' });
+  const storageLocations = normalizeStorageLocations(await getJsonSetting('storage_locations', []));
+  const storage = storagePortablePatch(req.body || {}, {}, storageLocations);
   const { rows } = await pool.query(
-    `INSERT INTO part (name, category_id, product_url, storage_location, notes, spec_summary)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [name.trim(), category_id || null, product_url || null, storage_location || null, notes || null, spec_summary || null],
+    `INSERT INTO part (name, category_id, product_url, storage_location, notes, spec_summary, portable_data)
+     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *`,
+    [name.trim(), category_id || null, product_url || null, storage.storage_location, notes || null, spec_summary || null, JSON.stringify(storage.portable_data)],
   );
   res.json(rows[0]);
 }));
@@ -1340,16 +1433,19 @@ app.get('/api/parts/:id', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/parts/:id', asyncHandler(async (req, res) => {
-  const { name, category_id, product_url, storage_location, notes, spec_summary } = req.body;
+  const { name, category_id, product_url, notes, spec_summary } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Part name is required' });
+  const { rows: currentRows } = await pool.query(`SELECT portable_data FROM part WHERE id=$1`, [req.params.id]);
+  if (!currentRows[0]) return res.status(404).json({ error: 'Part not found' });
+  const storageLocations = normalizeStorageLocations(await getJsonSetting('storage_locations', []));
+  const storage = storagePortablePatch(req.body || {}, currentRows[0].portable_data, storageLocations);
   const { rows } = await pool.query(
     `UPDATE part
      SET name=$1, category_id=$2, product_url=$3, storage_location=$4,
-         notes=$5, spec_summary=$6, updated_at=NOW()
-     WHERE id=$7 RETURNING *`,
-    [name.trim(), category_id || null, product_url || null, storage_location || null, notes || null, spec_summary || null, req.params.id],
+         notes=$5, spec_summary=$6, portable_data=$7::jsonb, updated_at=NOW()
+     WHERE id=$8 RETURNING *`,
+    [name.trim(), category_id || null, product_url || null, storage.storage_location, notes || null, spec_summary || null, JSON.stringify(storage.portable_data), req.params.id],
   );
-  if (!rows[0]) return res.status(404).json({ error: 'Part not found' });
   res.json(rows[0]);
 }));
 
@@ -1479,6 +1575,16 @@ app.put('/api/settings/theme', asyncHandler(async (req, res) => {
     ...(req.body && typeof req.body === 'object' ? req.body : {}),
   });
   await setJsonSetting(pool, 'theme_settings', next);
+  res.json(next);
+}));
+
+app.get('/api/settings/storage-locations', asyncHandler(async (req, res) => {
+  res.json(normalizeStorageLocations(await getJsonSetting('storage_locations', [])));
+}));
+
+app.put('/api/settings/storage-locations', asyncHandler(async (req, res) => {
+  const next = normalizeStorageLocations(req.body?.storage_locations || req.body);
+  await setJsonSetting(pool, 'storage_locations', next);
   res.json(next);
 }));
 
@@ -1679,12 +1785,13 @@ app.put('/api/projects/:id', asyncHandler(async (req, res) => {
   const { rows: currentRows } = await pool.query(`SELECT portable_data FROM project WHERE id=$1`, [req.params.id]);
   if (!currentRows[0]) return res.status(404).json({ error: 'Project not found' });
   const nextPortable = portable_data === undefined
-    ? currentRows[0].portable_data
-    : serializePortableProjectData(portable_data);
+    ? externalizePortableProjectDataInlineImages(currentRows[0].portable_data, `project-${req.params.id}`)
+    : externalizePortableProjectDataInlineImages(portable_data, `project-${req.params.id}`);
+  const nextNotes = externalizeInlineDataImages(notes || '', `project-${req.params.id}-notes`);
   const { rows } = await pool.query(
     `UPDATE project SET name=$1, status=$2, notes=$3, portable_data=$4::jsonb, updated_at=NOW()
      WHERE id=$5 RETURNING *`,
-    [name.trim(), status || 'active', notes || null, JSON.stringify(nextPortable), req.params.id],
+    [name.trim(), status || 'active', nextNotes || null, JSON.stringify(nextPortable), req.params.id],
   );
   res.json({ ...rows[0], portable_data: normalizePortableProjectData(rows[0].portable_data) });
 }));
@@ -1736,7 +1843,16 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
   ]);
   const project = projectResult.rows[0];
   if (!project) return res.status(404).json({ error: 'Project not found' });
-  const portableProject = normalizePortableProjectData(project.portable_data);
+  const portableProject = externalizePortableProjectDataInlineImages(project.portable_data, `project-${project.id}`);
+  const externalizedNotes = externalizeInlineDataImages(project.notes, `project-${project.id}-notes`);
+  if (externalizedNotes !== (project.notes || '') || JSON.stringify(portableProject) !== JSON.stringify(normalizePortableProjectData(project.portable_data))) {
+    await pool.query(
+      `UPDATE project SET notes=$1, portable_data=$2::jsonb, updated_at=NOW() WHERE id=$3`,
+      [externalizedNotes || null, JSON.stringify(portableProject), project.id],
+    );
+    project.notes = externalizedNotes;
+    project.portable_data = portableProject;
+  }
   const categoryPathMap = buildCategoryPathMap(categories.rows);
   const exportedFiles = files.rows;
   const noteImages = [
@@ -1791,7 +1907,8 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       image_path: project.image_path,
       image_archive_path: project.image_path ? `project-image/${safeZipName(project.image_path)}` : null,
     },
-    note_images: noteImages.map((image) => ({
+    note_images: noteImages.map((image, index) => ({
+      id: `${image.context || 'image'}-${index + 1}`,
       image_path: image.image_path,
       archive_path: image.archive_path,
       context: image.context,
@@ -1822,6 +1939,8 @@ app.get('/api/projects/:id/export', asyncHandler(async (req, res) => {
       category_label: part.category_label,
       product_url: part.product_url,
       storage_location: part.storage_location,
+      storage_container_id: parseJsonSetting(part.portable_data, {}).storage_container_id || '',
+      storage_slot_id: parseJsonSetting(part.portable_data, {}).storage_slot_id || '',
       notes: part.notes,
       spec_summary: part.spec_summary,
       image_archive_path: part.image_archive_path,
@@ -2430,9 +2549,13 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
         const partImage = importedPart.image_archive_path
           ? await copyRequiredZipEntry(directory, importedPart.image_archive_path, IMAGE_DIR, `${importedPart.name}-image`, `Project export is missing ${importedPart.image_archive_path}.`)
           : null;
+        const partPortable = {
+          storage_container_id: importedPart.storage_container_id || '',
+          storage_slot_id: importedPart.storage_slot_id || '',
+        };
         const { rows: [created] } = await client.query(
-          `INSERT INTO part (name, category_id, product_url, storage_location, notes, spec_summary, image_path)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          `INSERT INTO part (name, category_id, product_url, storage_location, notes, spec_summary, image_path, portable_data)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *`,
           [
             importedPart.name,
             categoryId,
@@ -2441,6 +2564,7 @@ app.post('/api/projects/import/commit', asyncHandler(async (req, res) => {
             importedPart.notes || null,
             importedPart.spec_summary || null,
             partImage,
+            JSON.stringify(partPortable),
           ],
         );
         part = created;
@@ -3018,6 +3142,12 @@ const BACKUP_SEQ_TABLES = [
 ];
 
 async function buildBackupData() {
+  const client = await pool.connect();
+  try {
+    await externalizeStoredProjectInlineImages(client);
+  } finally {
+    client.release();
+  }
   const tables = [
     ...BACKUP_TABLES,
   ];
@@ -3195,6 +3325,8 @@ function buildDesktopBackupManifest(data) {
       imageThumbnailPackagePath: portable.image_thumbnail_path ? `parts/${safeZipName(part.id)}/image/thumb-${safeZipName(part.name)}${path.extname(portable.image_thumbnail_path) || '.jpg'}` : '',
       productUrl: part.product_url || '',
       storageLocation: part.storage_location || '',
+      storageContainerId: portable.storage_container_id || '',
+      storageSlotId: portable.storage_slot_id || '',
       specSummary: part.spec_summary || '',
       notes: part.notes || '',
       documents,
@@ -3320,6 +3452,7 @@ function buildDesktopBackupManifest(data) {
     state: {
       version: APP_VERSION,
       theme: appMetadataValue(data, 'theme_settings', DEFAULT_THEME_SETTINGS),
+      storageLocations: normalizeStorageLocations(appMetadataValue(data, 'storage_locations', [])),
       categories: [
         { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
         ...categories
@@ -3393,6 +3526,7 @@ function collectReferencedProjectImagePaths(project) {
       if (photo.original_image_path) refs.add(photo.original_image_path);
       if (photo.markup_image_path) refs.add(photo.markup_image_path);
       if (photo.thumbnail_path) refs.add(photo.thumbnail_path);
+      if (photo.markup_thumbnail_path) refs.add(photo.markup_thumbnail_path);
     }
   }
   return refs;
@@ -3414,7 +3548,7 @@ async function collectReferencedUploadPaths() {
     importItemsResult,
   ] = await Promise.all([
     pool.query(`SELECT image_path FROM category WHERE image_path IS NOT NULL`),
-    pool.query(`SELECT image_path FROM part WHERE image_path IS NOT NULL`),
+    pool.query(`SELECT image_path, portable_data FROM part`),
     pool.query(`SELECT file_path FROM part_document WHERE file_path IS NOT NULL`),
     pool.query(`SELECT image_path, notes, portable_data FROM project`),
     pool.query(`SELECT file_path FROM project_file WHERE file_path IS NOT NULL`),
@@ -3422,7 +3556,11 @@ async function collectReferencedUploadPaths() {
   ]);
 
   categoriesResult.rows.forEach((row) => row.image_path && referenced.images.add(row.image_path));
-  partsResult.rows.forEach((row) => row.image_path && referenced.images.add(row.image_path));
+  partsResult.rows.forEach((row) => {
+    if (row.image_path) referenced.images.add(row.image_path);
+    const portable = parseJsonSetting(row.portable_data, {});
+    if (portable.image_thumbnail_path) referenced.images.add(portable.image_thumbnail_path);
+  });
   partDocsResult.rows.forEach((row) => row.file_path && referenced.documents.add(row.file_path));
   projectFilesResult.rows.forEach((row) => row.file_path && referenced.projects.add(row.file_path));
   projectsResult.rows.forEach((row) => {
@@ -3506,6 +3644,20 @@ async function restoreBackupData(client, data) {
   }
 }
 
+async function externalizeStoredProjectInlineImages(client) {
+  const { rows } = await client.query(`SELECT id, notes, portable_data FROM project ORDER BY id`);
+  for (const row of rows) {
+    const nextNotes = externalizeInlineDataImages(row.notes, `project-${row.id}-notes`);
+    const nextPortable = externalizePortableProjectDataInlineImages(row.portable_data, `project-${row.id}`);
+    if (nextNotes !== (row.notes || '') || JSON.stringify(nextPortable) !== JSON.stringify(normalizePortableProjectData(row.portable_data))) {
+      await client.query(
+        `UPDATE project SET notes=$1, portable_data=$2::jsonb, updated_at=NOW() WHERE id=$3`,
+        [nextNotes || null, JSON.stringify(nextPortable), row.id],
+      );
+    }
+  }
+}
+
 function restoreUploadsFromZip(directory) {
   [DOC_DIR, PROJECT_DIR, IMAGE_DIR, IMPORT_DIR].forEach(emptyUploadDir);
   const uploadRoots = new Set(['documents', 'projects', 'images', 'imports']);
@@ -3566,6 +3718,9 @@ async function mergeDesktopBackupPortableState(client, directory, state) {
   if (state.theme && typeof state.theme === 'object') {
     await setJsonSetting(client, 'theme_settings', state.theme);
   }
+  if (Array.isArray(state.storageLocations)) {
+    await setJsonSetting(client, 'storage_locations', normalizeStorageLocations(state.storageLocations));
+  }
   if (state.template?.checklist) {
     await setJsonSetting(client, 'template_checklist', state.template.checklist);
   }
@@ -3579,7 +3734,7 @@ async function mergeDesktopBackupPortableState(client, directory, state) {
     })));
   }
 
-  const projectRows = await client.query(`SELECT id, name, portable_data FROM project ORDER BY id`);
+  const projectRows = await client.query(`SELECT id, name, notes, portable_data FROM project ORDER BY id`);
   const projectByName = new Map(projectRows.rows.map((row) => [String(row.name || '').toLowerCase(), row]));
   const fileRows = await client.query(`SELECT id, project_id, original_filename, tracker_key, uploaded_at FROM project_file ORDER BY id`);
 
@@ -3638,9 +3793,13 @@ async function mergeDesktopBackupPortableState(client, directory, state) {
       }
       : currentPortable.instructions;
 
+    const restoredNotes = typeof projectState.notes === 'string'
+      ? await restoreDesktopInlineImages(directory, projectState.notes, `project-notes-${projectRow.id}`)
+      : projectRow.notes;
+
     await client.query(
-      `UPDATE project SET portable_data=$1::jsonb, updated_at=NOW() WHERE id=$2`,
-      [JSON.stringify(serializePortableProjectData({
+      `UPDATE project SET notes=$1, portable_data=$2::jsonb, updated_at=NOW() WHERE id=$3`,
+      [restoredNotes || null, JSON.stringify(serializePortableProjectData({
         ...currentPortable,
         photo_library: photoLibrary.length ? photoLibrary : currentPortable.photo_library,
         instructions,
@@ -3671,20 +3830,26 @@ async function mergeDesktopBackupPortableState(client, directory, state) {
   const partRows = await client.query(`SELECT id, name, portable_data FROM part ORDER BY id`);
   const partByName = new Map(partRows.rows.map((row) => [String(row.name || '').toLowerCase(), row]));
   for (const partState of Array.isArray(state.parts) ? state.parts : []) {
-    if (!partState?.imageThumbnailPackagePath) continue;
     const partRow = partByName.get(String(partState.name || '').toLowerCase());
     if (!partRow) continue;
     const currentPortable = parseJsonSetting(partRow.portable_data, {});
-    const thumbnailPath = await copyRequiredZipEntry(
-      directory,
-      partState.imageThumbnailPackagePath,
-      IMAGE_DIR,
-      `thumb-${partState.name || path.basename(partState.imageThumbnailPackagePath)}`,
-      `Desktop backup is missing ${partState.imageThumbnailPackagePath}.`,
-    );
+    const thumbnailPath = partState.imageThumbnailPackagePath
+      ? await copyRequiredZipEntry(
+        directory,
+        partState.imageThumbnailPackagePath,
+        IMAGE_DIR,
+        `thumb-${partState.name || path.basename(partState.imageThumbnailPackagePath)}`,
+        `Desktop backup is missing ${partState.imageThumbnailPackagePath}.`,
+      )
+      : '';
     await client.query(
       `UPDATE part SET portable_data=$1::jsonb, updated_at=NOW() WHERE id=$2`,
-      [JSON.stringify({ ...currentPortable, image_thumbnail_path: thumbnailPath || currentPortable.image_thumbnail_path || '' }), partRow.id],
+      [JSON.stringify({
+        ...currentPortable,
+        image_thumbnail_path: thumbnailPath || currentPortable.image_thumbnail_path || '',
+        storage_container_id: partState.storageContainerId || currentPortable.storage_container_id || '',
+        storage_slot_id: partState.storageSlotId || currentPortable.storage_slot_id || '',
+      }), partRow.id],
     );
   }
 }
@@ -3894,6 +4059,7 @@ app.post('/api/settings/restore', uploadBackup.single('file'), asyncHandler(asyn
     await restoreBackupData(client, data);
     if (directory) await restoreUploadsFromZip(directory);
     if (directory && desktopManifest) await mergeDesktopBackupPortableState(client, directory, desktopManifest.state);
+    await externalizeStoredProjectInlineImages(client);
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (e) {
